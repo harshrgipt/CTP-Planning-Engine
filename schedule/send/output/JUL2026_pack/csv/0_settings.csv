@@ -1,0 +1,30 @@
+setting,value,acts_on,lives_in,what_it_does
+min_demand_units,PCR 300 / TBR 150,"DEMAND (per GT, per month)",planner/config.py:265,"A GT whose WHOLE-MONTH demand is below this is not planned at all. It is routed to the residual policy, not built. ON for this run."
+min_lot_units (B12 lot floor),PCR 150 / TBR 70,RUN (one continuous same-GT block on one machine),planner/config.py:248,"Smallest economic build RUN. Judge it on sheet 1b_build_runs, NEVER on sheet 1 -- a sheet-1 row is a slice, not a run."
+build slice size,"emergent, not a setting",SLICE (one delivery to a press),planner/cmbc/l7_pull_release.py:866,A slice is a JIT DELIVERY of green tyres to a press. It has NO minimum by design. n comes from R5 and B12: n >= (H+Q*cad)/71.7 and n <= Q/min_lot.
+SUBFLOOR_BUDGET,PCR 180 / TBR 400,RUN,planner/cmbc/l7_pull_release.py:178,"How many below-floor setups are allowed, matched to the plant's own revealed rate. The floor is a BUDGET, not a gate -- the plant has no hard floor."
+HARD_FLOOR mode,budget,RUN,planner/cmbc/l7_pull_release.py:183,'budget' = plant-calibrated allowance · '1' = absolute gate · 'off' = no floor.
+RUN_MULT,1,RUN,planner/cmbc/l7_pull_release.py:144,Run-size target as a multiple of the lot floor.
+SLICE_MULT,PCR 0.0 / TBR 3.0,SLICE,planner/cmbc/l7_pull_release.py:98,"0 = the DERIVED R5/B12 slice rule. TBR 3.0 = legacy arm, kept because the derived rule costs TBR 8.67 points (EXPERT_AUDIT)."
+SLICE_AGGR,1,SLICE,planner/cmbc/l7_pull_release.py:112,"Where to sit in the legal window [n_R5, n_B12]. 1.0 = smallest legal slice."
+LOT_INTERVAL_H (T),16,RUN,planner/cmbc/l7_pull_release.py:282,Replenishment interval. Q_g = r_g x T. THIS IS THE GT-INVENTORY DIAL: I = sum_g r_g (T/2 + tau*).
+SPAN_MULT,99,RUN,planner/cmbc/l7_pull_release.py:152,"How many intervals of cure demand one run may absorb. 99 = effectively off, so R5 is the outer bound."
+R5 GT shelf life,72 h,TYRE (hard),planner/config.py:325 (GT_SHELF_LIFE_H),A green tyre not cured within this is scrap. Checked per slice in L7 and per tyre in L11.
+R17 tau release floor,min,SLICE,planner/cmbc/l7_pull_release.py:318,'min' = physical floor tau_min. 'star' restores the old tau*-as-a-wall (cost 7.2 pt).
+gt_wip_rail,"PCR 4,800 / TBR 1,400",PLANT GT STOCK (hard placement refusal),planner/config.py:192,Runaway rail on the daily-mean GT stock. A placement breaching it is refused.
+gt_wip_rail_margin,0.94,PLANT GT STOCK,planner/config.py:206,Rail is checked at 94% of the stated cap so the STATED cap survives post-plan reconciliation.
+G8 GT inventory band,"PCR 4,500-4,800 / TBR 1,200-1,500","PLANT GT STOCK (reported, not enforced)",planner/config.py:168,"Plant's stated steady-state band. A DETECTOR in L11, never a controller."
+HARD_LOCK (rim lock),true,MACHINE,planner/cmbc/l7_pull_release.py:187,"A GT may only build on its rim's locked machines. Measured, priced, kept."
+HARD_PIN,true,MACHINE,planner/cmbc/l7_pull_release.py:210,Try the GT's own partitioned machine first.
+PARTITION_PLANTS,PCR,MACHINE,planner/cmbc/l7_pull_release.py:~232,Static GT->machine partition applied to these plants. TBR gains nothing from it.
+MACH_UTIL_CAP,0.95,MACHINE,planner/cmbc/l7_pull_release.py:117,A GT stays on one machine until that machine reaches this occupancy.
+CAD_BASIS,machine,MACHINE,planner/cmbc/l7_pull_release.py:129,"'machine' = each machine's own cadence. 'plant' is the flat-cadence bug, A/B only."
+B16 criterion,coverage,MACHINE (TBR TT/TL split),planner/cmbc/l2_capability.py:277,How TBR machines are split into tube-type / tubeless groups. No spill across groups.
+EARLY_STOCK,true,CURE START,planner/cmbc/l5_cure_master.py:76,Lets a GT holding enough opening stock start curing at t0 instead of idling ~11 h. Worth +2.3 pt.
+L5 floor basis,star,CURE START,planner/cmbc/l5_cure_master.py:83,'star' = tau* + build_band day-1 cure floor. Applies only where a GT has no opening stock to bridge the gap.
+CARRY_OUT,true,HORIZON,planner/cmbc/l5_cure_master.py:51,A campaign starting inside the month may finish outside it; the tail is next month's opening state. This is why sheet 7 has carry_out days.
+lookahead_days,0,DEMAND HORIZON,planner/cmbc/l4_net_requirement.py:103,"Next-month demand pulled into this month's build. 0 = off, so nothing pulls build on the last days -> the month-end WIP collapse."
+changeover minutes,PCR BJ x5: same 28 / diff 60 min · PCR CONTI x6: same 22 / diff 42 min · TBR MESNAC x6: same 10 / diff 24 min · TBR SAV x3: same 10 / diff 24 min,MACHINE (setup cost),masters/Master_Building_ChangeoverTime_*.csv,Setup time IS changeover time and it is SIZE-DEPENDENT. Never hardcode these.
+press roster,PCR 86  TBR 80,PRESS,masters/press_list_2026-07.json,Presses available this month. July's roster is reused for August unless the plant sends a new one.
+opening GT stock,"PCR 4,820 / TBR 1,297  (assumed age 7 h)",OPENING STATE,masters/opening_gt/opening_gt_2026-07.parquet,"Green tyres on the floor at 07:00 on day 1, with their ages. Netted off BUILD, never off cure."
+seed,42,DETERMINISM,planner/config.py,Same inputs give a byte-identical plan.

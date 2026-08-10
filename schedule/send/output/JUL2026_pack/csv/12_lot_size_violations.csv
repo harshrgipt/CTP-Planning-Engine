@@ -1,0 +1,2 @@
+plant,machine,gt_code,gt_description,rim,run_qty,floor,shortfall,slices,start_ts,end_ts,block_id,why_allowed
+(none),"","","","",,,,,"","","","ZERO VIOLATIONS. Every build run on both plants is at or above its B12 floor (PCR 150 / TBR 70), judged on setup blocks split at >1 h gaps. PLANNER_STRICT_LOT_FLOOR=1."

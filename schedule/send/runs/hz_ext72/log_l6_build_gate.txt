@@ -1,0 +1,38 @@
+============================================================================================
+L6  BUILDING FEASIBILITY GATE  --  2026-07
+============================================================================================
+  tau*  PCR 4.32 h   TBR 4.81 h   cadence PCR 62 s  TBR 207 s
+
+  ALLOCATION FEASIBILITY (tightest machine sets)
+    plant   machines   GTs    need h     cap h    load
+    TBR            6     1     3,687     4,464   82.6%
+    PCR           11    28     6,617     8,184   80.9%
+    TBR            3    10     1,718     2,232   76.9%
+    TBR            2     4       802     1,488   53.9%
+    TBR            5     3     1,956     3,720   52.6%
+    TBR            2    10       640     1,488   43.0%
+
+  BUILD LOAD per day (pull window = cure window shifted by tau*)
+    plant  machines  need h/day p50  avail h/day  load p50  load max  days >100%
+    PCR          11             212          264     80.3%     90.7%           0
+          3-day rolling: p50 80.6%   max 87.4%   <- the binding test (72 h build flexibility)
+    TBR           9             172          216     79.5%     88.3%           0
+          3-day rolling: p50 79.5%   max 85.8%   <- the binding test (72 h build flexibility)
+
+  RATE FEASIBILITY (can building match the campaign's consumption?)
+    plant   campaigns  infeasible  need rate p50  cap rate p50
+    PCR           274           0            6.1         540.0
+    TBR           194           0            1.6          53.9
+
+  GATE
+    R2    PASS                          
+    B16   PASS                          
+    rate  PASS                          
+    R10   PASS                          
+    timingFAIL  1 violations            
+    alloc PASS                          
+
+  >>> INFEASIBLE -- 1 findings. RESHAPE AT L5, do not patch downstream.
+      [timing] - -                                  71 campaigns start before t0 + tau* + first-slice build time -- L7 cannot release them
+
+  -> hz_ext72/l6_infeasible.parquet · l6_build_load.parquet

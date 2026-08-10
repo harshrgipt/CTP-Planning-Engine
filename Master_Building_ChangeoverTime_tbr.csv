@@ -1,0 +1,10 @@
+wcID,MachineCode,Machine Name,Same Size(Minutes),Different Size(Minutes),Man Required Same Size,Man Required Different Size,Changeover cost/mandays
+0,3801,SAV-1,10,24,2,3,665
+1,3802,SAV-2,10,24,2,3,665
+2,3803,SAV-3,10,24,2,3,665
+3,3804,MESNAC-1,10,24,2,3,665
+4,3805,MESNAC-2,10,24,2,3,665
+5,3806,MESNAC-3,10,24,2,3,665
+6,3807,MESNAC-4,10,24,2,3,665
+7,3808,MESNAC-5,10,24,2,3,665
+8,3809,MESNAC-6,10,24,2,3,665

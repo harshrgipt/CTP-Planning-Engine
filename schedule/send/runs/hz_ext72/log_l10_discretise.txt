@@ -1,0 +1,31 @@
+============================================================================================
+L10  TIME DISCRETISATION & SEQUENCING  --  2026-07   (R13)
+============================================================================================
+  day starts 07:00 · shifts A 07-15 · B 15-23 · C 23-07
+  mould change PCR 360 min  TBR 361 min
+
+  REPORT WINDOW: days 1-31 only. Dropped 374 cure and 35 build shift-rows planned past the month boundary (next month's work).
+  SHIFT PLAN
+  plant stage     shifts used  per shift p50     peak  peak/p50
+  PCR   cure               93          4,291    4,429      1.0x
+  PCR   build              93          4,259    4,983      1.2x
+  TBR   cure               93          1,032    1,060      1.0x
+  TBR   build              93          1,025    1,229      1.2x
+
+  MOULD CHANGES  (206 events)
+  plant   changes  press-h lost  same rim  spanning a shift boundary
+  PCR         117           701        44                  78 (67%)
+  TBR          89           535        60                  63 (71%)
+
+  R13 CREW LOAD per shift
+  plant   shifts w/ change  changes p50   peak  fitters p50   peak  levelling gain
+  PCR                   44            2      7            6     21             71%
+  TBR                   45            2      5            6     15             60%
+
+  R13 CAPACITY CHECK: BLOCKED
+    crew SIZE per change is known (2 same-size / 3 different-size,
+    from the plant's changeover master) but the ROSTER is not -- how
+    many fitters are on shift is GAP-4. Demand is computed above; the
+    check against capacity cannot run and is not assumed to pass.
+
+  -> hz_ext72/cure_by_shift · build_by_shift · mould_changes · crew_load

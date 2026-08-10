@@ -1,0 +1,47 @@
+  plant CT: ON  (build GTxmake, cure GT; cavities 2, load/unload PCR 2.9 TBR 8.3 min)
+    PCR  build 440 rows  40-84 s (p50 67)   cure 230 GTs  10-22 min (p50 13)  avail 0.8897
+    TBR  build 152 rows  187-214 s (p50 202)   cure 131 GTs  42-60 min (p50 52)  avail 0.8282
+============================================================================================
+L5  CURE CAMPAIGN MASTER PLAN  --  2026-08
+============================================================================================
+  horizon 2026-08-01 07:00 -> 2026-09-04 07:00 (31 days)   greedy, deterministic
+  mode=extend  report boundary 2026-09-01 07:00  + 72 h planning tail (NOT reported, NOT counted)
+  ramp: a campaign may not cure before t0 + tau* + its OWN first-slice build time (tau* PCR 4.32h TBR 4.81h)
+
+  TAKT  level-loaded press-concurrency budget (mode=flat alpha=1.0 plants=TBR subpart=1)
+    partition       work press-h   level n  budget N  presses
+    PCR ALL               67,506      92.2        86       86
+    PCR R12                8,482      11.6        12       28
+    PCR R13               19,333      26.4        27       50
+    PCR R14                5,917       8.1         9       36
+    PCR R15                9,204      12.6        13       45
+    PCR R16                5,262       7.2         8       27
+    PCR R17                7,239       9.9        10       43
+    PCR R18                6,828       9.3        10       33
+    TBR ALL               59,537      81.1        79       79
+    TBR TL                13,877      18.9        19       58
+    TBR TT                45,661      62.2        63       76
+
+  backfill: recovered 82 tyres by splitting into available gaps (21 campaigns still short)
+
+  carry-out: 164 campaigns run past the horizon, 28,401 tyres into next month
+
+  plant   campaigns      tyres  presses  hours p50  band p50  mould chg
+  PCR           285    417,055       86      178.6      85.3           
+  TBR           191     98,871       79      274.2     190.1           
+  TOTAL         476    515,926                                      213
+
+  GATES
+    press double-booking            : 0  PASS
+    GT concurrency > active moulds  : 0  PASS
+    campaigns past horizon          : 0  PASS
+    campaigns crossing month end    : 164  -- 79,525 campaign-tyres, only the in-month fraction is counted
+    unplaced                        : 21  see cure_unplaced.parquet
+        past horizon                          19
+        no eligible press                      2
+
+  PRESS UTILISATION (vs L3 ceiling)
+    PCR:    66,334 press-h of    63,984 = 103.7%   output 417,055 of 430,246 = 96.9% of ceiling
+    TBR:    59,145 press-h of    58,776 = 100.6%   output 98,871 of 108,215 = 91.4% of ceiling
+
+  -> C:\Users\91810\Downloads\send\schedule\send\runs\aug_ship/cure_campaigns.parquet

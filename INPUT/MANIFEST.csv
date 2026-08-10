@@ -1,0 +1,29 @@
+file,kind,status
+raw/Master_Building_ChangeoverTime_pcr.csv,raw,copied
+raw/Master_Building_ChangeoverTime_tbr.csv,raw,copied
+raw/Master_Mapping_Mould_SKU.csv,raw,copied
+raw/TBR BUILDING ALLOWABLE MATRIX.xlsx,raw,copied
+raw/ALL PCR CTP SKUS.xlsx,raw,copied
+raw/Recipemaster 1.xlsx,raw,copied
+raw/recipelookup 1.xlsx,raw,copied
+raw/wcmaster 1.xlsx,raw,copied
+"raw/CTP Set up building ,curing and inspection (1) 2.xlsx",raw,copied
+raw/Building Business Rules.docx,raw,copied
+derived/tt_tl.parquet,R8,"2325 rows, 902 TT / 1423 TL"
+derived/gt_size.parquet,R6/R7,"599 rows, 10 rims"
+derived/aging_limits.parquet,R5/R17,1282 SKUs; MaxAging 48h=493 72h=74; interlock on=136
+derived/mould_cavity.parquet,R3/R14,510 SKUs with a cavity/capacity value
+derived/allowed_press_matrix.parquet,warehouse,2392 rows
+derived/allowed_machine_matrix.parquet,warehouse,420 rows
+derived/capacity_press_day.parquet,warehouse,172 rows
+derived/capacity_machine_day.parquet,warehouse,20 rows
+derived/calendar_shifts.parquet,warehouse,3 rows
+derived/cycle_time_curing.parquet,warehouse,172 rows
+derived/cycle_time_building.parquet,warehouse,20 rows
+derived/opening_gt_inventory.parquet,warehouse,90 rows
+derived/sku_construction.parquet,warehouse,230 rows
+derived/tbr_machine_certified.parquet,warehouse,670 rows
+derived/gt_sku_master.parquet,warehouse,475 rows
+derived/lot_size.parquet,warehouse,191 rows
+derived/press_platen_master.parquet,warehouse,184 rows
+demand/,R1,8 months

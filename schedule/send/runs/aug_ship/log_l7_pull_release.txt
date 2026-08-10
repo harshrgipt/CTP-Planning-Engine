@@ -1,0 +1,88 @@
+  opening GT available at t0: PCR 4,847  TBR 1,275 tyres
+
+============================================================================================
+L7  PULL RELEASE OF BUILDING  --  2026-08
+============================================================================================
+  release = t_cure - tau* - build_duration      tau* PCR 4.32 h  TBR 4.81 h
+  NOT cure_ts = max(cure_ts, supply_ts)
+
+  TARGETED RIM SPILL (derived; rim over its own locked capacity)
+    PCR R12   -> TBMPCR2Stage2    budget  193.8 h   (1 locked machine)
+    PCR R14   -> TBMPCR2Stage2    budget  193.8 h   (1 locked machine)
+    PCR R16   -> TBMPCR2Stage2    budget  193.8 h   (1 locked machine)
+    PCR R17   -> TBMPCR2Stage2    budget  193.8 h   (1 locked machine)
+  HORIZON MACHINE ASSIGNMENT (one machine per GT, capacity outranks the lock)
+    PCR: 54 GTs -> 65 (GT, machine) pairs, p50 1.20 machines/GT, 8 GTs needed a 2nd machine on capacity
+    TBR: 33 GTs -> 37 (GT, machine) pairs, p50 1.12 machines/GT, 4 GTs needed a 2nd machine on capacity
+
+  LOT SIZING -- Q_g = r_g x T,  T = 2 x (I_target/sum(r_g) - tau*)
+  plant   GTs   sum r_g  I target  tau* cost   T (h)       basis
+  PCR      54       730     4,650      3,153   16.00         env
+  TBR      33       145     1,350        699   16.00         env
+
+  PRE-FLIGHT  I = lambda x W  (band and full demand jointly fix W)
+  plant  lambda_full  tau* floor  W_max @band  W modelled   verdict
+  PCR            555       2,397         8.65        8.19        OK
+  TBR            132         633        11.40        7.75        OK
+
+  CLUSTER SEQ  B=4.0 h  key=rc  plants=['PCR', 'TBR']  -- 1575/1780 jobs carry a cluster, 1731 carry a rim
+  MAKE-ROOM bail reasons: cold=154  late=9  noroom=132  rail=177
+  MAKE-ROOM shortfall h p50 2.43 vs dur p50 5.23
+
+  MAKE-ROOM (compact-and-insert) runs rescued: PCR 130  TBR 60
+
+  RIM SPILL USED
+    PCR R12   -> TBMPCR2Stage2     126.1 h of 193.8 h ( 65.1% of budget)
+    PCR R14   -> TBMPCR2Stage2      48.9 h of 193.8 h ( 25.2% of budget)
+    PCR R16   -> TBMPCR2Stage2      96.7 h of 193.8 h ( 49.9% of budget)
+    PCR R17   -> TBMPCR2Stage2     152.9 h of 193.8 h ( 78.9% of budget)
+  plant    slices      tyres  machines  slices/campaign
+  PCR       2,593    406,294        11              9.1
+  TBR       3,616     96,885         9             18.9
+
+  BUILD RUNS  (maximal consecutive same-GT block on one machine)
+  plant     runs   qty p50   < floor  hours p50   in band  slices/run  chg/mach-day
+  PCR        948       307      0.0%       5.36     25.2%           2     2.62/2.66
+         machines/GT p50 2 (max 3) · 23 GTs spilled past their pin
+  TBR        564       103      0.0%       5.79     63.7%           4     1.90/3.56
+         machines/GT p50 2 (max 4) · 20 GTs spilled past their pin
+
+  GT WAIT  (the head -- Phase 0: plant 4.4 / 4.8 h, old engine 7.4 h)
+  plant      p05     p50    mean     p95     max    tau*   vs tau*
+  PCR       0.27    5.60    8.02   24.45   56.49    4.32       30%
+  TBR       0.27    5.76    9.40   32.83   67.18    4.81       20%
+
+  GATES
+    machine double-booking          : 0  PASS
+    setup not reserved (changeover) : 0 of 1492 transitions  PASS
+    GT wait > 72 h (R5)          : 0  PASS
+    built AFTER cure (impossible)   : 0  PASS
+    GT wait < tau_min (R17)         : 40  WARN -- press starvation risk
+    slices with no feasible release : 145  see build_starved.parquet
+
+  GT INVENTORY (build - cure, from the released plan; TIME-weighted)
+  plant   predicted     mean   daymax      max          band    rail
+  PCR         8,280    4,223    4,623    7,254   4,500-4,800   4,800
+  TBR         2,612    1,184    1,340    1,842   1,200-1,500   1,400
+
+  RECONCILED PLAN  (cure trimmed to what building actually feeds)
+  plant   cure placed    cure fed     unfed   % fed
+  PCR         417,055     406,294    10,761   97.4%
+  TBR          98,871      96,885     1,986   98.0%
+  TOTAL       515,926     503,179    12,747   97.5%
+
+  CONSERVATION
+    fed <= supplied                 : 0 breaches  PASS
+
+  TRUE FULFILMENT vs plannable demand (IN-MONTH output): 477,350 of 523,335 = 91.2%
+    incl. carry-out tail (NOT this month's output): 503,179 = 96.1%  -- difference 25,829 tyres cured after month end
+    PCR: in-month   384,123 (90.64%) · carry-out tail  22,171 · opening stock consumed  4,080
+    TBR: in-month    93,227 (93.66%) · carry-out tail   3,658 · opening stock consumed  1,015
+
+  CARRY-FORWARD GT  (built in-month, cured after the boundary -> next month's opening stock)
+  plant     tyres   GTs  age p50  age p95  age max  > 72 h (scrap)  closing ledger
+  PCR       4,587    14     11.0     25.3     35.0               0           4,587
+  TBR         905    15      8.3     42.2     51.1               0             905
+    -> masters\opening_gt\carryforward_gt_2026-09.parquet   (next month: PLANNER_OPENING_GT=carryforward_gt_2026-09.parquet)
+
+  -> aug_ship/build_schedule.parquet · gt_events.parquet · cure_campaigns_reconciled.parquet · carry_forward_gt.parquet

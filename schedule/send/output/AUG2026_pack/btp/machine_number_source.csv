@@ -1,0 +1,5 @@
+stage,plant,n_machines,n_resolved,source_file,source_column,fallback,example
+curing,PCR,86,86,wcmaster 1.xlsx (via warehouse/derived/wc_master.parquet),name -> press_no  (keyed by iD = MES wcID),"","4805, 4806, 4807, 4808"
+curing,TBR,79,79,wcmaster 1.xlsx (via warehouse/derived/wc_master.parquet),name -> press_no  (keyed by iD = MES wcID),"","5435, 5436, 5437, 5438"
+building,PCR,11,0,"","","unresolved - engine machine name kept as-is (wcmaster has no TBM<plant><n>Stage2 row; the 34NN/38NN link is mined, not a lookup)","TBMPCR10Stage2, TBMPCR11Stage2, TBMPCR1Stage2"
+building,TBR,9,0,"","","unresolved - engine machine name kept as-is (wcmaster has no TBM<plant><n>Stage2 row; the 34NN/38NN link is mined, not a lookup)","TBMTBR1Stage2, TBMTBR2Stage2, TBMTBR3Stage2"

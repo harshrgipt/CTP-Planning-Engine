@@ -1,0 +1,231 @@
+{
+  "as_of": "2026-08-01",
+  "window_start": "2025-12-01",
+  "window_end": "2026-08-01",
+  "months": 8,
+  "generated_utc": "2026-08-07T09:27:33",
+  "tau": {
+    "TBR": {
+      "tau_star_h": 4.809,
+      "tau_min_h": 0.268,
+      "tau_p05_h": 0.672,
+      "tau_warn_h": 26.754,
+      "n": 751277,
+      "cv_across_months": 0.10809437467556872,
+      "method": "per-tyre productionID=gtbarCode"
+    },
+    "PCR": {
+      "tau_star_h": 4.319,
+      "tau_min_h": 0.268,
+      "tau_p05_h": 0.863,
+      "tau_warn_h": 28.835,
+      "n": 2985257,
+      "cv_across_months": 0.057556843516737614,
+      "method": "per-tyre productionID=gtbarCode"
+    }
+  },
+  "campaign_gap_cutoff_h": {
+    "PCR": 6.0,
+    "TBR": 6.02,
+    "_source": "press_mould_change.parquet median, per plant"
+  },
+  "campaign_bands": {
+    "PCR": {
+      "build": {
+        "hours_p10": 3.02,
+        "hours_p50": 7.54,
+        "hours_p90": 19.34,
+        "hours_mean": 12.0,
+        "hours_deciles": [
+          1.94,
+          3.78,
+          4.97,
+          6.03,
+          7.03,
+          8.1,
+          9.45,
+          11.42,
+          15.43,
+          26.39
+        ],
+        "qty_p50": 359,
+        "qty_mean": 591.1,
+        "qty_cv": 3.27,
+        "n_campaigns": 5069
+      },
+      "cure": {
+        "hours_p10": 0.0,
+        "hours_p50": 85.33,
+        "hours_p90": 513.93,
+        "hours_mean": 174.72,
+        "hours_deciles": [
+          0.0,
+          0.0,
+          0.55,
+          22.56,
+          59.45,
+          114.83,
+          191.49,
+          286.87,
+          420.08,
+          643.39
+        ],
+        "qty_p50": 495,
+        "qty_mean": 1064.2,
+        "qty_cv": 1.226,
+        "n_campaigns": 2805
+      }
+    },
+    "TBR": {
+      "build": {
+        "hours_p10": 2.38,
+        "hours_p50": 5.37,
+        "hours_p90": 10.74,
+        "hours_mean": 7.08,
+        "hours_deciles": [
+          1.71,
+          3.09,
+          4.05,
+          4.53,
+          5.01,
+          5.85,
+          6.8,
+          7.81,
+          9.31,
+          13.85
+        ],
+        "qty_p50": 80,
+        "qty_mean": 108.0,
+        "qty_cv": 1.742,
+        "n_campaigns": 6978
+      },
+      "cure": {
+        "hours_p10": 0.0,
+        "hours_p50": 190.09,
+        "hours_p90": 671.28,
+        "hours_mean": 255.94,
+        "hours_deciles": [
+          0.0,
+          0.01,
+          41.78,
+          95.62,
+          154.15,
+          229.15,
+          301.3,
+          409.37,
+          581.9,
+          741.78
+        ],
+        "qty_p50": 316,
+        "qty_mean": 434.8,
+        "qty_cv": 0.946,
+        "n_campaigns": 1728
+      }
+    }
+  },
+  "yields": {
+    "TBR": {
+      "cure_yield": 0.98202,
+      "n": 753263,
+      "build_yield": null,
+      "build_yield_note": "QualityStatus has 1 distinct value(s) -- no variation, so no build scrap signal exists. NOT assumed 1.0."
+    },
+    "PCR": {
+      "cure_yield": 0.99712,
+      "n": 2995222,
+      "build_yield": null,
+      "build_yield_note": "QualityStatus has 1 distinct value(s) -- no variation, so no build scrap signal exists. NOT assumed 1.0."
+    }
+  },
+  "press_availability": {
+    "PCR": {
+      "mtbf_h": 106.78,
+      "mttr_h": 13.24,
+      "availability": 0.8897,
+      "n_down_events": 4267,
+      "method": "press gap > 4.0 h counted as down"
+    },
+    "TBR": {
+      "mtbf_h": 56.4,
+      "mttr_h": 11.7,
+      "availability": 0.8282,
+      "n_down_events": 6846,
+      "method": "press gap > 4.0 h counted as down"
+    }
+  },
+  "changeover": {
+    "PCR": {
+      "observed_p50_min": 13.79,
+      "observed_p90_min": 44.91,
+      "n": 4854,
+      "declared_same_min": [
+        22.0,
+        28.0
+      ],
+      "declared_diff_min": [
+        42.0,
+        60.0
+      ],
+      "n_machines": 11
+    },
+    "TBR": {
+      "observed_p50_min": 9.63,
+      "observed_p90_min": 20.15,
+      "n": 6776,
+      "declared_same_min": [
+        10.0
+      ],
+      "declared_diff_min": [
+        24.0
+      ],
+      "n_machines": 9
+    }
+  },
+  "sister_lift": {
+    "PCR": {
+      "observed": 0.9423,
+      "chance": 0.1876,
+      "lift": 5.02,
+      "ci95_lift": [
+        4.98,
+        5.06
+      ],
+      "n_adjacencies": 3502,
+      "rim_resolved_pct": 71.7
+    },
+    "TBR": {
+      "observed": 0.7499,
+      "chance": 0.302,
+      "lift": 2.48,
+      "ci95_lift": [
+        2.45,
+        2.52
+      ],
+      "n_adjacencies": 6804,
+      "rim_resolved_pct": 100.0
+    }
+  },
+  "visit_law": {
+    "PCR": {
+      "exponent_b": 0.57,
+      "intercept_a": -2.4715,
+      "cv_b": 0.053,
+      "r2_min": 0.514,
+      "r2_max": 0.822,
+      "n_months": 8
+    },
+    "TBR": {
+      "exponent_b": 0.689,
+      "intercept_a": -2.2655,
+      "cv_b": 0.054,
+      "r2_min": 0.63,
+      "r2_max": 0.913,
+      "n_months": 8
+    }
+  },
+  "tables": {
+    "cure_cycle": "cure_cycle_2026-08-01.parquet",
+    "build_cadence": "build_cadence_2026-08-01.parquet",
+    "observed_lot_sizes": "observed_lot_sizes_2026-08-01.parquet"
+  }
+}

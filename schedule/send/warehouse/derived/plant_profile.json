@@ -1,0 +1,493 @@
+{
+  "building": {
+    "PCR": {
+      "tyres": 2996086,
+      "resources": 11,
+      "skus": 108,
+      "days": 242,
+      "run_length_units": {
+        "n": 4895,
+        "mean": 612.07,
+        "p50": 367.0,
+        "p90": 914.0,
+        "p95": 1240.0,
+        "min": 1.0,
+        "max": 305046.0
+      },
+      "changeovers_per_resource_day": {
+        "n": 2661,
+        "mean": 1.84,
+        "p50": 2.0,
+        "p90": 4.0,
+        "p95": 4.0,
+        "min": 0.0,
+        "max": 10.0
+      },
+      "changeovers_per_resource_shift": {
+        "n": 7903,
+        "mean": 0.62,
+        "p50": 1.0,
+        "p90": 1.0,
+        "p95": 2.0,
+        "min": 0.0,
+        "max": 5.0
+      },
+      "changeovers_per_plant_day": {
+        "n": 242,
+        "mean": 20.18,
+        "p50": 20.0,
+        "p90": 25.0,
+        "p95": 26.0,
+        "min": 1.0,
+        "max": 30.0
+      },
+      "stickiness_pct": 99.84,
+      "skus_per_resource_day": {
+        "n": 2661,
+        "mean": 2.17,
+        "p50": 2.0,
+        "p90": 3.0,
+        "p95": 4.0,
+        "min": 1.0,
+        "max": 5.0
+      },
+      "resources_per_sku": {
+        "n": 108,
+        "mean": 1.57,
+        "p50": 1.0,
+        "p90": 3.0,
+        "p95": 3.0,
+        "min": 1.0,
+        "max": 5.0
+      },
+      "unique_skus_per_day": {
+        "n": 242,
+        "mean": 22.39,
+        "p50": 22.0,
+        "p90": 26.0,
+        "p95": 27.0,
+        "min": 11.0,
+        "max": 30.0
+      },
+      "daily_output_plant": {
+        "n": 242,
+        "mean": 12380.52,
+        "p50": 12719.0,
+        "p90": 13252.0,
+        "p95": 13397.0,
+        "min": 2511.0,
+        "max": 13655.0
+      },
+      "daily_output_per_resource": {
+        "n": 2661,
+        "mean": 1125.92,
+        "p50": 1115.0,
+        "p90": 1524.0,
+        "p95": 1567.0,
+        "min": 10.0,
+        "max": 1733.0
+      },
+      "daily_output_cv": 0.116,
+      "seconds_per_unit": {
+        "n": 11,
+        "mean": 60.0,
+        "p50": 63.0,
+        "p90": 69.0,
+        "p95": 78.0,
+        "min": 49.0,
+        "max": 78.0
+      }
+    },
+    "TBR": {
+      "tyres": 753621,
+      "resources": 9,
+      "skus": 83,
+      "days": 243,
+      "run_length_units": {
+        "n": 6813,
+        "mean": 110.62,
+        "p50": 82.0,
+        "p90": 164.0,
+        "p95": 211.0,
+        "min": 1.0,
+        "max": 6126.0
+      },
+      "changeovers_per_resource_day": {
+        "n": 2180,
+        "mean": 3.12,
+        "p50": 3.0,
+        "p90": 5.0,
+        "p95": 6.0,
+        "min": 0.0,
+        "max": 8.0
+      },
+      "changeovers_per_resource_shift": {
+        "n": 6440,
+        "mean": 1.06,
+        "p50": 1.0,
+        "p90": 2.0,
+        "p95": 2.0,
+        "min": 0.0,
+        "max": 5.0
+      },
+      "changeovers_per_plant_day": {
+        "n": 243,
+        "mean": 28.0,
+        "p50": 29.0,
+        "p90": 34.0,
+        "p95": 35.0,
+        "min": 0.0,
+        "max": 48.0
+      },
+      "stickiness_pct": 99.1,
+      "skus_per_resource_day": {
+        "n": 2180,
+        "mean": 3.02,
+        "p50": 3.0,
+        "p90": 5.0,
+        "p95": 5.0,
+        "min": 1.0,
+        "max": 7.0
+      },
+      "resources_per_sku": {
+        "n": 83,
+        "mean": 2.3,
+        "p50": 2.0,
+        "p90": 4.0,
+        "p95": 5.0,
+        "min": 1.0,
+        "max": 8.0
+      },
+      "unique_skus_per_day": {
+        "n": 243,
+        "mean": 24.84,
+        "p50": 25.0,
+        "p90": 28.0,
+        "p95": 29.0,
+        "min": 3.0,
+        "max": 32.0
+      },
+      "daily_output_plant": {
+        "n": 243,
+        "mean": 3101.32,
+        "p50": 3213.0,
+        "p90": 3411.0,
+        "p95": 3442.0,
+        "min": 4.0,
+        "max": 3489.0
+      },
+      "daily_output_per_resource": {
+        "n": 2180,
+        "mean": 345.7,
+        "p50": 359.0,
+        "p90": 390.0,
+        "p95": 406.0,
+        "min": 1.0,
+        "max": 447.0
+      },
+      "daily_output_cv": 0.142,
+      "seconds_per_unit": {
+        "n": 9,
+        "mean": 205.56,
+        "p50": 207.0,
+        "p90": 213.0,
+        "p95": 220.0,
+        "min": 189.0,
+        "max": 220.0
+      }
+    }
+  },
+  "curing": {
+    "PCR": {
+      "tyres": 2976840,
+      "resources": 92,
+      "skus": 113,
+      "days": 242,
+      "run_length_units": {
+        "n": 1234,
+        "mean": 2412.35,
+        "p50": 1166.0,
+        "p90": 6392.0,
+        "p95": 8439.0,
+        "min": 1.0,
+        "max": 26755.0
+      },
+      "changeovers_per_resource_day": {
+        "n": 20654,
+        "mean": 0.06,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 3.0
+      },
+      "changeovers_per_resource_shift": {
+        "n": 60293,
+        "mean": 0.02,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 3.0
+      },
+      "changeovers_per_plant_day": {
+        "n": 242,
+        "mean": 4.72,
+        "p50": 4.0,
+        "p90": 8.0,
+        "p95": 10.0,
+        "min": 0.0,
+        "max": 21.0
+      },
+      "stickiness_pct": 99.96,
+      "skus_per_resource_day": {
+        "n": 20654,
+        "mean": 1.03,
+        "p50": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "min": 1.0,
+        "max": 3.0
+      },
+      "resources_per_sku": {
+        "n": 113,
+        "mean": 5.87,
+        "p50": 2.0,
+        "p90": 15.0,
+        "p95": 21.0,
+        "min": 1.0,
+        "max": 44.0
+      },
+      "unique_skus_per_day": {
+        "n": 242,
+        "mean": 25.0,
+        "p50": 25.0,
+        "p90": 28.0,
+        "p95": 29.0,
+        "min": 13.0,
+        "max": 33.0
+      },
+      "daily_output_plant": {
+        "n": 242,
+        "mean": 12300.99,
+        "p50": 12636.0,
+        "p90": 13225.0,
+        "p95": 13291.0,
+        "min": 1371.0,
+        "max": 13792.0
+      },
+      "daily_output_per_resource": {
+        "n": 20654,
+        "mean": 144.13,
+        "p50": 152.0,
+        "p90": 188.0,
+        "p95": 198.0,
+        "min": 1.0,
+        "max": 224.0
+      },
+      "daily_output_cv": 0.109,
+      "seconds_per_unit": {
+        "n": 92,
+        "mean": 485.85,
+        "p50": 472.0,
+        "p90": 592.0,
+        "p95": 714.0,
+        "min": 223.5,
+        "max": 972.0
+      }
+    },
+    "TBR": {
+      "tyres": 737849,
+      "resources": 80,
+      "skus": 99,
+      "days": 242,
+      "run_length_units": {
+        "n": 855,
+        "mean": 862.98,
+        "p50": 468.0,
+        "p90": 2224.0,
+        "p95": 3077.0,
+        "min": 1.0,
+        "max": 8873.0
+      },
+      "changeovers_per_resource_day": {
+        "n": 18770,
+        "mean": 0.04,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 8.0
+      },
+      "changeovers_per_resource_shift": {
+        "n": 53703,
+        "mean": 0.01,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 8.0
+      },
+      "changeovers_per_plant_day": {
+        "n": 242,
+        "mean": 3.2,
+        "p50": 3.0,
+        "p90": 6.0,
+        "p95": 7.0,
+        "min": 0.0,
+        "max": 11.0
+      },
+      "stickiness_pct": 99.89,
+      "skus_per_resource_day": {
+        "n": 18770,
+        "mean": 1.02,
+        "p50": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "min": 1.0,
+        "max": 3.0
+      },
+      "resources_per_sku": {
+        "n": 99,
+        "mean": 6.35,
+        "p50": 4.0,
+        "p90": 14.0,
+        "p95": 18.0,
+        "min": 1.0,
+        "max": 30.0
+      },
+      "unique_skus_per_day": {
+        "n": 242,
+        "mean": 28.76,
+        "p50": 29.0,
+        "p90": 32.0,
+        "p95": 33.0,
+        "min": 13.0,
+        "max": 35.0
+      },
+      "daily_output_plant": {
+        "n": 242,
+        "mean": 3048.96,
+        "p50": 3137.5,
+        "p90": 3356.0,
+        "p95": 3396.0,
+        "min": 367.0,
+        "max": 3567.0
+      },
+      "daily_output_per_resource": {
+        "n": 18770,
+        "mean": 39.31,
+        "p50": 42.0,
+        "p90": 48.0,
+        "p95": 50.0,
+        "min": 1.0,
+        "max": 60.0
+      },
+      "daily_output_cv": 0.125,
+      "seconds_per_unit": {
+        "n": 80,
+        "mean": 343.55,
+        "p50": 333.75,
+        "p90": 534.0,
+        "p95": 573.0,
+        "min": 78.0,
+        "max": 683.0
+      }
+    }
+  },
+  "size_lock": {
+    "PCR": {
+      "size_lock_pct": 99.89,
+      "transitions": 2996075,
+      "size_known_pct": 66.22
+    },
+    "TBR": {
+      "size_lock_pct": 99.75,
+      "transitions": 753612,
+      "size_known_pct": 66.98
+    }
+  },
+  "gt_inventory": {
+    "PCR": {
+      "build_to_cure_lag_h": {
+        "n": 2976857,
+        "mean": 8.85,
+        "p50": 4.32,
+        "p90": 20.24,
+        "p95": 28.8,
+        "min": 0.01,
+        "max": 2527.74
+      },
+      "daily_built": {
+        "n": 242,
+        "mean": 12380.52,
+        "p50": 12719.0,
+        "p90": 13252.0,
+        "p95": 13397.0,
+        "min": 2511.0,
+        "max": 13655.0
+      },
+      "daily_cured": {
+        "n": 242,
+        "mean": 12341.26,
+        "p50": 12663.5,
+        "p90": 13256.0,
+        "p95": 13298.0,
+        "min": 3563.0,
+        "max": 13812.0
+      },
+      "gt_balance_running": {
+        "n": 242,
+        "mean": 4715.34,
+        "p50": 4549.5,
+        "p90": 8631.0,
+        "p95": 8901.0,
+        "min": -255.0,
+        "max": 9501.0
+      }
+    },
+    "TBR": {
+      "build_to_cure_lag_h": {
+        "n": 737811,
+        "mean": 8.36,
+        "p50": 4.81,
+        "p90": 20.12,
+        "p95": 26.71,
+        "min": 0.14,
+        "max": 1555.29
+      },
+      "daily_built": {
+        "n": 243,
+        "mean": 3101.32,
+        "p50": 3213.0,
+        "p90": 3411.0,
+        "p95": 3442.0,
+        "min": 4.0,
+        "max": 3489.0
+      },
+      "daily_cured": {
+        "n": 243,
+        "mean": 3044.08,
+        "p50": 3138.0,
+        "p90": 3362.0,
+        "p95": 3399.0,
+        "min": 0.0,
+        "max": 3567.0
+      },
+      "gt_balance_running": {
+        "n": 243,
+        "mean": 6162.44,
+        "p50": 5157.0,
+        "p90": 12733.0,
+        "p95": 13386.0,
+        "min": 203.0,
+        "max": 13965.0
+      }
+    }
+  },
+  "_meta": {
+    "from": "2025-12-01",
+    "to": "2026-07-31",
+    "build_rows": 3749707
+  }
+}

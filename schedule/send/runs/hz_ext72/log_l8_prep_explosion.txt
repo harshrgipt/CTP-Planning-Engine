@@ -1,0 +1,71 @@
+============================================================================================
+L8  PREP / MIXING BACK-EXPLOSION  --  2026-07   (R16)
+============================================================================================
+  components with no ageing-spec match: ['PRE CUT ROLL MATERIAL']
+  BOM coverage: 57/87 GTs (66%)   UNEXPLODED 61,511 tyres across 30 GTs
+  (an unexploded GT is prep demand that exists on the floor but not in this plan)
+
+  COMPONENT REQUIREMENT
+  component                 min h  max h   lines      quantity  unit  window h
+  cap strip                     4     48   3,952    29,404,856     M        44
+  steel belt                    4     72   8,208     1,304,178   NOS        68
+  bead apex                     0     24   4,045     1,285,744   NOS        24
+  tread                         2     24   4,104     1,208,367     M        22
+  ply                           4     96   6,033       960,298   NOS        92
+  sidewall                      2     72   4,045       872,092     M        70
+  inner liner                   6     72   4,045       734,646     M        66
+  belt edge filler              4     48   3,115       489,858     M        44
+  shoulder pad                  2     72   3,115       274,983     M        70
+  gum strip                     4     48   3,115       267,902     M        44
+  nylon-1                       4     72   2,971       256,238     M        68
+  apexed bead                   0     24   3,115       163,762   NOS        24
+  pre assembly                  6     72   3,115       133,706     M        66
+  steel chipper left            4     72   3,115        81,881   NOS        68
+  belt-1                        4     72   3,115        81,881   NOS        68
+  bodyply                       4     96   3,115        81,881   NOS        92
+  belt-2                        4     72   3,115        81,881   NOS        68
+  steel chipper right           4     72   3,115        81,881   NOS        68
+  belt-3                        4     72   3,115        81,881   NOS        68
+  belt-4                        4     72   3,115        81,881   NOS        68
+  nylon2&3                      4     72     933        76,810     M        68
+  slitted material              0     48     426        70,854     M        48
+
+  PER-SHIFT PREP LOAD (8 h shifts)
+  plant component                 shifts   q/shift p50        peak  peak/p50
+  PCR   cap strip                     97       312,731     504,273      1.6x
+  PCR   steel belt                    97        14,334      17,596      1.2x
+  PCR   bead apex                     97        13,842      18,216      1.3x
+  PCR   tread                         98        13,313      19,001      1.4x
+  PCR   ply                           97        10,363      14,308      1.4x
+  PCR   sidewall                      98         9,631      13,272      1.4x
+  PCR   inner liner                   97         7,995      10,629      1.3x
+  PCR   slitted material              94           735       1,604      2.2x
+  TBR   belt edge filler              97         5,075       9,420      1.9x
+  TBR   shoulder pad                  96         2,892       5,188      1.8x
+  TBR   gum strip                     97         2,771       5,126      1.9x
+  TBR   nylon-1                       97         2,721       5,126      1.9x
+  TBR   apexed bead                   98         1,693       3,186      1.9x
+  TBR   pre assembly                  95         1,357       2,693      2.0x
+  TBR   steel chipper left            97           845       1,557      1.8x
+  TBR   steel chipper right           97           845       1,557      1.8x
+  TBR   belt-3                        97           845       1,557      1.8x
+  TBR   belt-2                        97           845       1,557      1.8x
+  TBR   belt-4                        97           845       1,557      1.8x
+  TBR   bodyply                       97           845       1,557      1.8x
+  TBR   belt-1                        97           845       1,557      1.8x
+  TBR   nylon2&3                      94           820       1,815      2.2x
+
+  TIGHTEST SHELF LIVES -- these bind prep, not the GT's 72 h
+    tread                        max    24 h        1,208,367 required
+    apexed bead                  max    24 h          163,762 required
+    bead apex                    max    24 h        1,285,744 required
+    gum strip                    max    48 h          267,902 required
+    cap strip                    max    48 h       29,404,856 required
+    -> a component made before its window is scrap, exactly as a GT
+       cured after 72 h is scrap. Both bounds are hard.
+
+  PREP CHANGEOVER MASTER: 71 operations across 33 machines, 11 sections
+    (capacity check needs prep routing + rates -- GAP-9 gave us
+     changeover times only, so load is not yet computable)
+
+  -> hz_ext72/prep_requirement.parquet

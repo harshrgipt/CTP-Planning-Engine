@@ -1,0 +1,59 @@
+plant,metric,value
+PCR,demand fulfilment (IN-MONTH output),96.6%
+PCR,"  basis: cure output inside the plant month, opening stock INCLUDED, carry-out tail EXCLUDED",""
+PCR,tyres CURED in-month (fulfilment numerator),"380,163"
+PCR,"  + carry-out tail, cured NEXT month (excluded)","6,762"
+PCR,tyres fed to presses (incl. both),"385,247"
+PCR,  of which BUILT this month (sheet 1),"380,895"
+PCR,  of which OPENING STOCK carried in,"4,352"
+PCR,  of which BUILT after month end (carry-out),0
+PCR,RECONCILIATION  build -> cure -> press capacity,""
+PCR,"  A  BUILT this month, sheet 1 + sheet 5 + sheet 7 'built'","380,895"
+PCR,  B  + OPENING GT STOCK consumed (on the floor at 07:00 day 1),"4,352"
+PCR,  C  - GT still unbuilt-into-cure at month end (closing stock -> next month's opening),310
+PCR,  D  = TYRES CURED IN-MONTH (A+B-C) = sheet 2 'qty' = sheet 7 'cured' = fulfilment numerator,"384,937"
+PCR,  E  + press slots planned but NEVER FED (starved presses),"6,701"
+PCR,"  F  = CAMPAIGN NAMEPLATE (sheet 2b 'qty_planned', sheet 6 'tyres_planned') = D + C + E","391,948"
+PCR,"     F is PRESS CAPACITY SEATED, not tyres. Never quote it as output.",""
+PCR,same-size share,91.4%
+PCR,build changeovers,827
+PCR,changeovers / machine-day,2.40
+PCR,lot p50 (tyres per run),317
+PCR,runs below min lot,0.0%
+PCR,R5 GT wait max,68.8 h
+PCR,GT wait p95,24.6 h
+PCR,GT inventory mean (time-wt),"4,096"
+PCR,GT inventory daily max,"4,631"
+PCR,GT inventory last day,"1,226"
+PCR,machine occupancy %,77.7%
+PCR,presses used,86
+PCR,realised n_g,3.01
+TBR,demand fulfilment (IN-MONTH output),94.5%
+TBR,"  basis: cure output inside the plant month, opening stock INCLUDED, carry-out tail EXCLUDED",""
+TBR,tyres CURED in-month (fulfilment numerator),"92,585"
+TBR,"  + carry-out tail, cured NEXT month (excluded)","1,918"
+TBR,tyres fed to presses (incl. both),"93,855"
+TBR,  of which BUILT this month (sheet 1),"92,845"
+TBR,  of which OPENING STOCK carried in,"1,010"
+TBR,  of which BUILT after month end (carry-out),0
+TBR,RECONCILIATION  build -> cure -> press capacity,""
+TBR,"  A  BUILT this month, sheet 1 + sheet 5 + sheet 7 'built'","92,845"
+TBR,  B  + OPENING GT STOCK consumed (on the floor at 07:00 day 1),"1,010"
+TBR,  C  - GT still unbuilt-into-cure at month end (closing stock -> next month's opening),830
+TBR,  D  = TYRES CURED IN-MONTH (A+B-C) = sheet 2 'qty' = sheet 7 'cured' = fulfilment numerator,"93,025"
+TBR,  E  + press slots planned but NEVER FED (starved presses),"2,786"
+TBR,"  F  = CAMPAIGN NAMEPLATE (sheet 2b 'qty_planned', sheet 6 'tyres_planned') = D + C + E","96,641"
+TBR,"     F is PRESS CAPACITY SEATED, not tyres. Never quote it as output.",""
+TBR,same-size share,100.0%
+TBR,build changeovers,809
+TBR,changeovers / machine-day,2.84
+TBR,lot p50 (tyres per run),93
+TBR,runs below min lot,0.0%
+TBR,R5 GT wait max,71.8 h
+TBR,GT wait p95,31.7 h
+TBR,GT inventory mean (time-wt),"1,236"
+TBR,GT inventory daily max,"1,340"
+TBR,GT inventory last day,889
+TBR,machine occupancy %,77.0%
+TBR,presses used,79
+TBR,realised n_g,2.45

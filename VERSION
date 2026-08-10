@@ -1,0 +1,32 @@
+CTP-PLANNER  2026.08.10
+
+There is no git history behind this snapshot, so the version marker is a DATE
+STAMP. Everything in this package is the state of the engine at the end of
+2026-08-10, including that day's changes:
+
+  2026-08-10  extend horizon              PLANNER_HORIZON_MODE=extend, 72 h tail
+              plant cycle times           PLANNER_PLANT_CT=1, per-machine build /
+                                          per-GT cure times from the plant's own
+                                          cycle-time workbooks instead of mined ones
+              strict lot floor            PLANNER_STRICT_LOT_FLOOR=1, B12 enforced
+                                          in `_place`, not only on the split path
+              B16 gated on BOTH sides     every GT has a machine AND every machine
+                                          has eligible in-group demand
+              setup reservation           changeover time is reserved on the machine,
+                                          verified 0 unreserved transitions
+              partition staleness gate    L7 REFUSES a partition built for another
+                                          month instead of silently falling back
+              BTP exporter                scripts/export_btp_format.py
+              order-book demand ingest    scripts/ingest_orderbook_demand.py
+              manual GT stock ingest      scripts/ingest_manual_opening_gt.py
+              GT namespace bridge         scripts/gt_namespace.py
+              SLIVER_TBR default 1.0 -> 0 the measured-best value is now the default,
+                                          so "run with the defaults" reproduces the
+                                          shipped packs
+
+REFERENCE RUNS IN THIS PACKAGE
+  schedule/send/runs/hz_ext72   July 2026    PCR 96.6 % / TBR 94.5 % in-month
+  schedule/send/runs/aug_ship   August 2026  PCR 90.6 % / TBR 93.7 % in-month
+
+Both were produced by `scripts/run_arm.py`, which builds L5 -> L11 fresh and
+refuses to report a directory whose scorecard describes a different plan.

@@ -1,0 +1,12 @@
+wcID,MachineCode,Machine Name,Same Size(Minutes),Different Size(Minutes),Man Required Same Size,Man Required Different Size,Changeover cost/mandays
+0,3401,TBMPCR1Stage2,28,60,2,3,665
+1,3402,TBMPCR2Stage2,28,60,2,3,665
+2,3403,TBMPCR3Stage2,28,60,2,3,665
+3,3404,TBMPCR4Stage2,28,60,2,3,665
+4,3405,TBMPCR5Stage2,28,60,2,3,665
+5,3406,TBMPCR6Stage2,22,42,2,3,665
+6,3407,TBMPCR7Stage2,22,42,2,3,665
+7,3408,TBMPCR8Stage2,22,42,2,3,665
+8,3409,TBMPCR9Stage2,22,42,2,3,665
+9,3410,TBMPCR10Stage2,22,42,2,3,665
+10,3411,TBMPCR11Stage2,22,42,2,3,665

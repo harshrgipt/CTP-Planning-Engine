@@ -1,0 +1,26 @@
+{
+  "run": "hz_ext72",
+  "month": "2026-07",
+  "fingerprint": {
+    "build_schedule.parquet": {
+      "bytes": 153187,
+      "mtime": 1786347947.076
+    },
+    "cure_campaigns.parquet": {
+      "bytes": 13193,
+      "mtime": 1786347942.686
+    },
+    "gt_events.parquet": {
+      "bytes": 79804,
+      "mtime": 1786347947.133
+    },
+    "cure_campaigns_reconciled.parquet": {
+      "bytes": 19682,
+      "mtime": 1786347947.156
+    },
+    "build_starved.parquet": {
+      "bytes": 3087,
+      "mtime": 1786347947.076
+    }
+  }
+}

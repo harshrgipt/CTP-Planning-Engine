@@ -1,0 +1,44 @@
+{
+  "capability_from": "full 8-month history",
+  "demand_cutoff": "2026-01-01",
+  "cycle_time_building": {
+    "rows": 20,
+    "source": "MES median inter-event gap"
+  },
+  "cycle_time_curing": {
+    "rows": 172,
+    "source": "MES span/tyres (matches plant-stated 13.5k/day)"
+  },
+  "capacity_machine_day": {
+    "rows": 20,
+    "source": "MES daily output distribution"
+  },
+  "capacity_press_day": {
+    "rows": 172,
+    "source": "MES daily output distribution"
+  },
+  "lot_size": {
+    "rows": 191,
+    "source": "MES gaps-and-islands campaign length"
+  },
+  "allowed_machine_matrix": {
+    "rows": 420,
+    "source": "MES direct + size-class widening (NEEDS plant master: covers 62%)"
+  },
+  "allowed_press_matrix": {
+    "rows": 2448,
+    "source": "MES direct + size-class widening (NEEDS plant master: covers 50%)"
+  },
+  "gt_size": {
+    "rows": 122,
+    "source": "construction mapping + GT-code parse (66% resolvable)"
+  },
+  "calendar_shifts": {
+    "rows": 3,
+    "source": "plant-confirmed 3 shifts 24/7"
+  },
+  "opening_gt_inventory": {
+    "rows": 90,
+    "source": "MES built-not-cured before cutoff"
+  }
+}

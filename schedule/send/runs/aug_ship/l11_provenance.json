@@ -1,0 +1,26 @@
+{
+  "run": "aug_ship",
+  "month": "2026-08",
+  "fingerprint": {
+    "build_schedule.parquet": {
+      "bytes": 150824,
+      "mtime": 1786352289.189
+    },
+    "cure_campaigns.parquet": {
+      "bytes": 12815,
+      "mtime": 1786352285.938
+    },
+    "gt_events.parquet": {
+      "bytes": 79122,
+      "mtime": 1786352289.243
+    },
+    "cure_campaigns_reconciled.parquet": {
+      "bytes": 19749,
+      "mtime": 1786352289.27
+    },
+    "build_starved.parquet": {
+      "bytes": 3088,
+      "mtime": 1786352289.191
+    }
+  }
+}

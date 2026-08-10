@@ -1,0 +1,57 @@
+============================================================================================
+L11  PLAN VALIDATION  --  2026-08   (R12)
+============================================================================================
+  invariant                                             actual            target  status
+  ----------------------------------------------------------------------------------------
+  PCR median GT wait vs tau*                            5.60 h       4.32 +/-20%  **FAIL**
+  PCR GT wait p95                                       24.4 h           <= 28 h  PASS
+  PCR GT wait max (R5)                                  56.5 h           <= 72 h  PASS
+  PCR GT wait below tau_min (R17)                            0                 0  PASS
+  PCR cure campaigns in 40-75 h band           15% (p50 179 h)            >= 80%  **FAIL**
+  PCR build slices per cure campaign                       9.0        ~11 +/-30%  PASS
+  PCR cure lots below min_cure_lot                           0                 0  PASS
+  PCR build runs below min_lot (150)                      0.0%            <= 16%  PASS
+  PCR build changeovers / machine-day                     2.62           <= 2.66  PASS
+  PCR same-size share of build changeovers               64.7%            >= 70%  **FAIL**
+  PCR WEIGHTED build changeover min/machine-day            88.0           <= 74.0  **FAIL**
+  PCR realised n_g (concurrent presses/GT)                2.72           >= 2.95  **FAIL**
+  PCR mean GT inventory (G8)                             4,223       4,500-4,800  **FAIL**
+  PCR last-day GT inventory (G8)                         4,472          >= 4,500  **FAIL**
+  PCR concurrent presses > active moulds                     0                 0  PASS
+  PCR mould changes / press-day occupied                  0.04           <= 0.08  PASS
+  TBR median GT wait vs tau*                            5.76 h       4.81 +/-20%  PASS
+  TBR GT wait p95                                       32.8 h           <= 28 h  **FAIL**
+  TBR GT wait max (R5)                                  67.2 h           <= 72 h  PASS
+  TBR GT wait below tau_min (R17)                            0                 0  PASS
+  TBR cure campaigns in 200-330 h band         26% (p50 274 h)            >= 80%  **FAIL**
+  TBR build slices per cure campaign                      18.7        ~35 +/-30%  **FAIL**
+  TBR cure lots below min_cure_lot                           0                 0  PASS
+  TBR build runs below min_lot (70)                       0.0%            <= 34%  PASS
+  TBR build changeovers / machine-day                     1.90           <= 3.56  PASS
+  TBR same-size share of build changeovers               91.9%            >= 70%  PASS
+  TBR WEIGHTED build changeover min/machine-day            21.2           <= 35.6  PASS
+  TBR realised n_g (concurrent presses/GT)                3.20           >= 2.81  PASS
+  TBR mean GT inventory (G8)                             1,184       1,200-1,500  **FAIL**
+  TBR last-day GT inventory (G8)                         1,038          >= 1,200  **FAIL**
+  TBR concurrent presses > active moulds                     0                 0  PASS
+  TBR mould changes / press-day occupied                  0.03           <= 0.04  PASS
+  PCR same-day build/cure correlation                   +0.748           >= 0.90  **FAIL**
+  TBR same-day build/cure correlation                   +0.859           >= 0.90  **FAIL**
+  PCR demand fulfilment                                  90.6%            >= 99%  **FAIL**
+  PCR carry-out tail (excluded from fulfilment)          22,171          reported  PASS
+  TBR demand fulfilment                                  93.7%            >= 99%  **FAIL**
+  TBR carry-out tail (excluded from fulfilment)           3,658          reported  PASS
+  demand fulfilment                                      91.2%            >= 99%  **FAIL**
+  residual demand flagged not dropped         19 GTs / 2,734 tyres      100% flagged  PASS
+
+  DELETED (would fail a CORRECT pull plant):
+    - daily build mix ~ daily cure mix   (observed cosine 0.21)
+    - minimise WIP toward zero           (starves presses)
+    - build changeover count as a gate   (plant absorbs them on purpose)
+
+  NOT CHECKED, DELIBERATELY:
+    - build slice minimum. A slice is a delivery, not a lot; a floor
+      there recreates the head gap. Do not add one.
+
+  23/40 invariants pass
+  >>> 17 INVARIANT(S) FAILED

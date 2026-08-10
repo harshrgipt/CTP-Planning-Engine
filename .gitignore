@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+# CTP planner -- what must never enter the repository, and why.
+# ---------------------------------------------------------------------------
+
+# RAW MES HISTORY (~4.4 GB, 32 M rows). These are the plant's production event
+# logs. They are the input to L0-L2 mining only; every mined artefact the
+# scheduler needs is committed under warehouse/derived/ and INPUT/derived/.
+curing/
+o_production/
+io_production_consumption/
+bom_pcr_tbr/
+Sku construction mapping/
+
+# REGENERABLE WAREHOUSE PARTITIONS. `make ingest` rebuilds these from the raw
+# CSVs. The three SMALL view directories the scheduler actually reads
+# (derived/, params/, masters/, bom/, construction/, balance/) are committed --
+# the three huge ones are not.
+schedule/send/warehouse/building_output/
+schedule/send/warehouse/consumption/
+schedule/send/warehouse/curing/
+
+# Virtualenv -- rebuild with the commands in README.md
+.venv/
+venv/
+
+# RUN DIRECTORIES. One reference run per month is committed
+# (schedule/send/runs/aug_ship and .../hz_ext72); everything else is a
+# throwaway A/B arm and there have been hundreds.
+schedule/send/runs/*
+!schedule/send/runs/aug_ship/
+!schedule/send/runs/hz_ext72/
+
+# Export packs other than the two shipped ones.
+schedule/send/output/*
+!schedule/send/output/AUG2026_pack/
+!schedule/send/output/JUL2026_pack/
+
+# Excel lock files -- created whenever someone opens a workbook.
+~$*
+*.xlsx#
+.~lock.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
