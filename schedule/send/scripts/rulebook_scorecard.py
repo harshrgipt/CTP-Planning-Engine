@@ -26,6 +26,7 @@ import polars as pl
 
 from planner.config import CONFIG
 from planner.data.warehouse import duck
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = Path(sys.argv[1] if len(sys.argv) > 1 else "runs/v19")
@@ -49,7 +50,7 @@ for _r in duck().execute(
     SETUP[_r[0]] = (float(_r[1]), float(_r[2]))
 DEFAULT_SETUP = {"PCR": (22.0, 42.0), "TBR": (10.0, 24.0)}
 
-sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
 RIM = {r["gt_code"]: str(r["rim"]) for r in sz.iter_rows(named=True)
        if r.get("gt_code") and r.get("rim")}
 

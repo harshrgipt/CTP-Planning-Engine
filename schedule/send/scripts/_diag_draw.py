@@ -14,11 +14,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
-INP = ROOT.parent.parent / "INPUT" / "derived"
+INP = paths.INPUT_DERIVED
 
 
 def main() -> int:

@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,9 +39,10 @@ from pathlib import Path
 import polars as pl
 
 from planner.config import CONFIG, GT_SHELF_LIFE_H
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-SRC_INP = ROOT.parent.parent / "INPUT" / "derived"
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
+SRC_INP = paths.INPUT_DERIVED
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
 
@@ -114,54 +114,42 @@ EARLY_STOCK = os.environ.get("PLANNER_EARLY_STOCK", "1") != "0"
 # baseline no longer exists, so re-measure before trusting it.
 FLOOR_BASIS = os.environ.get("PLANNER_L5_FLOOR_BASIS", "star")
 
-# ---- PROTOTYPE: LEVEL-LOADED PRESS-CONCURRENCY BUDGET (takt cap) ----------
-# Shipped L5 places every campaign AS EARLY AS POSSIBLE. Measured on its own
-# output (runs/aug_v3, runs/jul_v3), clipping every campaign into the days it is
-# actually spent:
-#     TBR Aug   press occupancy  98.2 % on days 1-20,  34.7 % on days 21-31,
-#               2.5 % on day 31.  Work content is 44,456 press-h against 58,776
-#               available -- the month only needs 75.6 % -- and the greedy spends
-#               all of it in the first two thirds.
-#     TBR Jul   98.3 % / 81.6 %, work content 92.3 %.
-#     PCR       98.0 % / 91.2 % (Jul), 98.1 % / 93.8 % (Aug), work content
-#               95.6 % / 96.6 % -- almost no slack to level.
-# Building must feed that draw. TBR build occupancy sits at 80-87 % for days
-# 1-20 and near zero after, and 5,810 TBR August tyres starve inside the busy
-# stretch while 24 % of the month's press capacity idles behind them.
+# ---- DIAGNOSTIC PROTOTYPE: BUILD-CAPACITY GOVERNOR ON CURE PLACEMENT -------
+# Shipped L5 places every campaign AS EARLY AS POSSIBLE and knows nothing about
+# building. Measured on its own output (runs/aug_v3, runs/jul_v3):
+#   * TBR TT group -- cure draw is 88-96% of that group's BUILD capacity for
+#     days 1-21, peak 98.6%, then 2-18% for days 22-31. Flat rate needed 71.3%.
+#   * PCR -- the plant aggregate never exceeds (80.9% peak) but FOUR OF SEVEN
+#     RIMS exceed the capacity of the machines locked to them: July R17 for
+#     334 h at up to 144.9%, R12 349 h, R16 139 h, R14 30 h.
+# Building cannot feed the plan in the first two thirds of the month and has
+# nothing to do in the last third. A SHAPE defect, not a capacity shortage --
+# no August partition is over 100% at its flat rate.
 #
-# DELAY ALONE CANNOT FIX IT and that is the whole design constraint: a TBR
-# campaign is 248 h at p50 (10.3 days), so there is no room to "spread starts".
-# The lever is CONCURRENCY -- run fewer presses for longer, not all of them for
-# two thirds of the month. 44,456 press-h / 744 h = 59.8 presses, so TBR August
-# wants ~60 presses seated at all times instead of 79 seated for 21 days.
+# Model BUILD CAPACITY AS A CUMULATIVE RENEWABLE RESOURCE consumed by a cure
+# campaign at `press_rate` tyres/h for its whole span, and place each campaign
+# at the earliest start whose span keeps every partition under a ceiling. This
+# is the serial schedule-generation scheme of RCPSP with a cumulative resource.
 #
-# So the governor is a budget on CONCURRENTLY SEATED PRESSES per partition:
-#     N_k = clip( ceil(ALPHA * W_k / U),  1,  |presses in k| )
-# with W_k the partition's total cure press-hours and U the usable span. ALPHA
-# is the front-loading allowance over the level rate (1.0 = perfectly flat).
-# Concurrency rather than a tyres/h ceiling because the press rate is a plant
-# constant here, so concurrency x press_rate IS the build draw; the integer form
-# is the physical decision ("how many presses may be seated at once"), needs no
-# cadence master, and is O(1) to test.
+#   PLANNER_L5_GOV = off   -- shipped behaviour, byte-identical control arm
+#                    cap   -- ceiling = the partition's physical build capacity
+#                    level -- ceiling = min(capacity, ALPHA x flat rate needed)
+#   PLANNER_L5_ALPHA       -- front-loading allowance over the flat rate
 #
-# PARTITIONS -- a campaign is charged to every partition it belongs to:
-#   (plant, "ALL")   always
-#   TBR (plant, TT/TL group)   the B16 dedication
-#   PCR (plant, rim)           the rim lock
-#
-# THE HORIZON GUARD -- this is the defect that killed the previous prototype.
-# The governor is CONSULTED ONLY WHEN THE UNGOVERNED PLACEMENT ALREADY FITS IN
-# THE MONTH, and it may only move the campaign to another window that also fits.
-# It can therefore never turn a deliverable campaign into an overrun one, and it
-# never touches a campaign that was going to be split/refused anyway. Under the
-# closed-box horizon a campaign pushed past month end is LOST VOLUME, not
-# carry-out (MEMORY §12), so the guard is a correctness requirement, not a
-# tuning choice. If no in-month governed window exists the campaign is placed
-# ungoverned: a shape preference must never become lost demand.
-GOV = os.environ.get("PLANNER_L5_TAKT", "off")          # off | flat
-ALPHA = float(os.environ.get("PLANNER_L5_ALPHA", "1.0"))
+# Partition = TT/TL group on TBR (B16), locked rim on PCR (the rim lock), and
+# the plant aggregate always. A campaign is tested against every partition it
+# belongs to.
+GOV = os.environ.get("PLANNER_L5_GOV", "level")
+ALPHA = float(os.environ.get("PLANNER_L5_ALPHA", "1.25"))
+# Which plants the governor acts on. Per-plant by precedent: SLICE_MULT and
+# PARTITION_PLANTS are already per-plant because TBR is a different plant, not a
+# smaller PCR (DO-NOT 15).
 GOV_PLANTS = {x for x in os.environ.get(
-    "PLANNER_L5_TAKT_PLANTS", "TBR").split(",") if x}
+    "PLANNER_L5_GOV_PLANTS", "PCR,TBR").split(",") if x}
+# Largest delay the governor may impose on one campaign, hours. Bounds the only
+# way it can cost anything: a delayed campaign pushes the press later and the
+# month's tail falls off the closed-box horizon.
+GOV_DELAY_H = float(os.environ.get("PLANNER_L5_GOV_DELAY_H", "1e9"))
 
 
 def main() -> None:
@@ -338,104 +326,142 @@ def main() -> None:
         k = (_j["plant"], _j["gt_code"])
         gt_total[k] = gt_total.get(k, 0.0) + _j["qty"]
 
-    free: dict[str, datetime] = {}                    # press -> next free time
-    last_gt: dict[str, str] = {}                      # press -> GT last run
-
-    # ================= LEVEL-LOADED PRESS-CONCURRENCY BUDGET ==============
-    # Partition tag per (plant, gt). ALL always; plus the TT/TL dedication on
-    # TBR and the rim lock on PCR when PLANNER_L5_TAKT_PART=1.
-    SUBPART = os.environ.get("PLANNER_L5_TAKT_PART", "0") != "0"
-    _gt_grp: dict[tuple, str] = {}
-    if SUBPART:
-        try:
-            _tt = pl.read_parquet(SRC_INP / "tt_tl.parquet")
-            _dm = pl.read_parquet(ROOT / "masters" / "demand" /
-                                  f"demand_{a.month}.parquet")
-            _tm = (_tt.filter(pl.col("sku") != "").select(["sku", "tt_tl"])
-                   .unique(subset=["sku"]))
-            for r in _dm.join(_tm, on="sku", how="left").iter_rows(named=True):
-                if r["plant"] == "TBR" and r.get("tt_tl"):
-                    _gt_grp[("TBR", r["gt_code"])] = str(r["tt_tl"])
-        except Exception as e:                        # noqa: BLE001
-            print(f"  takt: TT/TL tags unavailable ({e}) -- ALL partition only")
+    # ---- BUILD-CAPACITY GOVERNOR (prototype) -----------------------------
+    _cadf2 = pl.read_parquet(PARAMS / P0["tables"]["build_cadence"])
+    _cad_s = {r["machine"]: float(r["cadence_s_p50"])
+              for r in _cadf2.iter_rows(named=True)}
+    _cm = pl.read_parquet(D / f"cap_machine_{a.month}.parquet")
+    _grp = pl.read_parquet(D / f"cap_ttl_groups_{a.month}.parquet")
+    _group_of = {r["machine"]: r["group"] for r in _grp.iter_rows(named=True)}
+    _tt = pl.read_parquet(SRC_INP / "tt_tl.parquet")
+    _dem = pl.read_parquet(ROOT / "masters" / "demand" / f"demand_{a.month}.parquet")
+    _tmap = _tt.filter(pl.col("sku") != "").select(
+        ["sku", "tt_tl"]).unique(subset=["sku"])
+    _gt_tag = {r["gt_code"]: r["tt_tl"]
+               for r in _dem.join(_tmap, on="sku", how="left").iter_rows(named=True)
+               if r["tt_tl"] and r["plant"] == "TBR"}
+    _elig_m: dict[tuple, list] = {}
+    for _r in _cm.iter_rows(named=True):
+        _elig_m.setdefault((_r["plant"], _r["gt_code"]), []).append(_r["machine"])
+    _lock_rim: dict[str, str] = {}
+    _lf2 = SRC_INP / "machine_rim_lock.parquet"
+    if _lf2.exists():
+        for _r in pl.read_parquet(_lf2).iter_rows(named=True):
+            if _r["plant"] == "PCR":
+                _lock_rim[_r["machine"]] = str(_r["locked_rim"])
 
     def _pkeys(pl_: str, gt: str) -> list:
+        """Every capacity partition this GT's building must come out of."""
         ks = [(pl_, "ALL")]
-        if not SUBPART:
-            return ks
-        if pl_ == "TBR" and _gt_grp.get((pl_, gt)):
-            ks.append((pl_, _gt_grp[(pl_, gt)]))
+        if pl_ == "TBR" and _gt_tag.get(gt):
+            e = [x for x in _elig_m.get((pl_, gt), [])
+                 if _group_of.get(x) == _gt_tag[gt]]
+            if e:
+                ks.append((pl_, _gt_tag[gt]))
         elif pl_ == "PCR" and _rim.get(gt):
             ks.append((pl_, _rim[gt]))
         return ks
 
+    _mach_plant = {}
+    for (_pl, _g), _ms in _elig_m.items():
+        for _x in _ms:
+            _mach_plant[_x] = _pl
+    _cap_part: dict[tuple, float] = {}
+    for _x, _pl in _mach_plant.items():
+        _c = _cad_s.get(_x)
+        if not _c:
+            continue
+        _cap_part[(_pl, "ALL")] = _cap_part.get((_pl, "ALL"), 0.0) + 3600.0 / _c
+        if _pl == "TBR" and _group_of.get(_x):
+            _k = (_pl, _group_of[_x])
+            _cap_part[_k] = _cap_part.get(_k, 0.0) + 3600.0 / _c
+        if _pl == "PCR" and _lock_rim.get(_x):
+            _k = (_pl, _lock_rim[_x])
+            _cap_part[_k] = _cap_part.get(_k, 0.0) + 3600.0 / _c
+
     NH = ndays * 24
-    _work: dict[tuple, float] = {}                    # partition -> press-hours
-    _pset: dict[tuple, set] = {}                      # partition -> eligible presses
+    _prof: dict[tuple, list] = {k: [0.0] * NH for k in _cap_part}
+    _press_rate = {pp: cav_p[pp] * 3600.0 / cyc_p[pp] for pp in ("PCR", "TBR")}
+    _flat: dict[tuple, float] = {}
     for _j in jobs:
-        _r = cav_p[_j["plant"]] * 3600.0 / cyc_p[_j["plant"]]
         for _k in _pkeys(_j["plant"], _j["gt_code"]):
-            _work[_k] = _work.get(_k, 0.0) + _j["qty"] / max(_r, 1e-9)
-            _pset.setdefault(_k, set()).update(
-                elig.get((_j["plant"], _j["gt_code"]), []))
-    # Usable span: the ramp floor blocks every press at the head of the month,
-    # so the level rate must be computed over what is actually reachable.
-    _floor_h = {p: (tau_h[p] + bband[p]) if FLOOR_BASIS == "star"
-                else (tau_min_h[p] + bband[p]) for p in ("PCR", "TBR")}
-    _budget: dict[tuple, int] = {}
-    for _k, _w in _work.items():
-        _u = max(NH - _floor_h[_k[0]], 1.0)
-        _n = int(math.ceil(ALPHA * _w / _u - 1e-9))
-        _budget[_k] = max(1, min(len(_pset.get(_k, ())) or 1, _n))
-    _cnt: dict[tuple, list] = {k: [0] * NH for k in _budget}
-    _takt_moved = [0]
-    _takt_nowin = [0]
+            _flat[_k] = _flat.get(_k, 0.0) + float(_j["qty"])
+    _theta: dict[tuple, float] = {}
+    for _k, _capv in _cap_part.items():
+        _usable = max(NH - (tau_h[_k[0]] + bband[_k[0]]), 1.0)
+        _flatr = _flat.get(_k, 0.0) / _usable
+        if GOV == "cap":
+            _theta[_k] = _capv
+        elif GOV == "level":
+            _theta[_k] = min(_capv, max(ALPHA * _flatr, _press_rate[_k[0]]))
+        else:
+            _theta[_k] = float("inf")
     if GOV != "off":
-        print(f"  TAKT  level-loaded press-concurrency budget "
-              f"(mode={GOV} alpha={ALPHA} plants={','.join(sorted(GOV_PLANTS))}"
-              f" subpart={int(SUBPART)})")
-        print(f"    {'partition':<14}{'work press-h':>14}{'level n':>10}"
-              f"{'budget N':>10}{'presses':>9}")
-        for _k in sorted(_budget):
-            _u = max(NH - _floor_h[_k[0]], 1.0)
-            print(f"    {_k[0] + ' ' + _k[1]:<14}{_work[_k]:>14,.0f}"
-                  f"{_work[_k] / _u:>10.1f}{_budget[_k]:>10d}"
-                  f"{len(_pset.get(_k, ())):>9d}")
+        print(f"  GOVERNOR  build capacity as a cumulative resource "
+              f"(mode={GOV} alpha={ALPHA})")
+        print(f"    {'partition':<12}{'cap t/h':>10}{'flat t/h':>10}"
+              f"{'ceiling':>10}{'presses':>9}")
+        for _k in sorted(_cap_part):
+            _flatr = _flat.get(_k, 0.0) / max(
+                NH - (tau_h[_k[0]] + bband[_k[0]]), 1.0)
+            print(f"    {_k[0] + ' ' + _k[1]:<12}{_cap_part[_k]:>10.1f}"
+                  f"{_flatr:>10.1f}{_theta[_k]:>10.1f}"
+                  f"{_theta[_k] / _press_rate[_k[0]]:>9.1f}")
         print()
 
-    def _takt_free(pl_: str, gt: str, st: datetime, dur: timedelta):
-        """Earliest start >= st whose WHOLE span keeps every partition under its
-        concurrency budget AND still finishes in the month.  None => no such
-        window; the caller then places ungoverned (never lose volume)."""
+    _gov_blocked = [0]
+
+    def _gov_start(pl_: str, gt: str, st, dur_h: float):
+        """Earliest start >= st whose span keeps every partition under its
+        ceiling. None if it can never fit -- the caller then runs ungoverned, so
+        a shape constraint can never become lost demand (MEMORY 12)."""
         if GOV == "off" or pl_ not in GOV_PLANTS:
             return st
-        ks = [k for k in _pkeys(pl_, gt) if k in _budget]
+        ks = [k for k in _pkeys(pl_, gt) if k in _theta]
         if not ks:
             return st
-        need = max(1, int(dur.total_seconds() // 3600) + 1)
-        if need > NH:
-            return st
-        h = max(0, int((st - t0).total_seconds() // 3600))
-        while h + need <= NH:
-            bad = -1
-            for x in range(h, h + need):
-                if any(_cnt[k][x] >= _budget[k] for k in ks):
-                    bad = x
-                    break
-            if bad < 0:
+        r = _press_rate[pl_]
+        need = max(1, int(dur_h + 0.999))
+        ok = [not any(_prof[k][h] + r > _theta[k] + 1e-9 for k in ks)
+              for h in range(NH)]
+        # nxt_bad[h] = first infeasible hour at or after h
+        nxt = [NH] * (NH + 1)
+        for h in range(NH - 1, -1, -1):
+            nxt[h] = h if not ok[h] else nxt[h + 1]
+        # THE GOVERNOR MAY DELAY, NEVER PAST IN-MONTH COMPLETION.
+        # Without this bound the search trivially succeeds near hour 744 -- the
+        # window test only covers [h, min(h+need, NH)) -- so a campaign the
+        # ceiling cannot fit anywhere gets shoved to the end and truncated.
+        # Measured cost of the unbounded version, PCR: July placed 389,294 ->
+        # 381,678 and fulfilment 94.53 -> 93.61 %; August 393,486 -> 388,502.
+        # The horizon is a closed box (MEMORY 11c), so a delay that costs the
+        # tail is worse than the front-loading it was correcting. If no in-month
+        # window exists the caller falls back to ungoverned placement.
+        h0 = max(0, int((st - t0).total_seconds() // 3600))
+        h_last = min(NH - need, h0 + int(GOV_DELAY_H))
+        for h in range(h0, min(NH, h_last + 1)):
+            if nxt[h] >= min(h + need, NH):
                 return max(st, t0 + timedelta(hours=h))
-            h = bad + 1                               # jump past the blockage
+        _gov_blocked[0] += 1
         return None
 
-    def _takt_commit(pl_: str, gt: str, st: datetime, en: datetime) -> None:
-        """Charge the seat to every partition, always -- even for ungoverned and
-        backfill placements, or the profile stops describing the plan."""
+    def _gov_commit(pl_: str, gt: str, st, en) -> None:
+        if GOV == "off" or pl_ not in GOV_PLANTS:
+            return
+        r = _press_rate[pl_]
         h0 = max(0, int((st - t0).total_seconds() // 3600))
         h1 = min(NH, int((en - t0).total_seconds() // 3600) + 1)
         for k in _pkeys(pl_, gt):
-            if k in _cnt:
-                for x in range(h0, h1):
-                    _cnt[k][x] += 1
+            if k not in _prof:
+                continue
+            for h in range(h0, h1):
+                lo = max(st, t0 + timedelta(hours=h))
+                hi = min(en, t0 + timedelta(hours=h + 1))
+                if hi > lo:
+                    _prof[k][h] += r * (hi - lo).total_seconds() / 3600.0
+
+    free: dict[str, datetime] = {}                    # press -> next free time
+    last_gt: dict[str, str] = {}                      # press -> GT last run
 
     # ---- CARRY-IN: the other half of the rolling horizon --------------------
     # `carry_out.parquet` has been emitted since v11 and NOTHING read it, so the
@@ -493,42 +519,38 @@ def main() -> None:
         floor_ts = earliest_cure(p, gt, j['qty'], j['qty'] / max(
             cav_p[p] * 3600.0 / cyc_p[p], 1e-9))
         best = None
-        for pr in cand:
-            st = max(free.get(pr, t0), floor_ts)
-            if last_gt.get(pr) not in (None, gt):
-                st = st + timedelta(seconds=mch_p[p])   # mould change
-            # ---- TAKT: move the seat later, but ONLY inside the month -------
-            # Consulted only if the UNGOVERNED placement already fits. A
-            # campaign that was going to overrun is left exactly as the shipped
-            # layer had it, so the governor cannot create horizon overflow.
-            if st + dur <= horizon:
-                _g = _takt_free(p, gt, st, dur)
-                if _g is not None and _g + dur <= horizon:
-                    if _g > st:
-                        _takt_moved[0] += 1
-                    st = _g
-                elif _g is None:
-                    _takt_nowin[0] += 1
-            en = st + dur
-            # R3: at most `cap` presses may run this GT concurrently
-            overlap = sum(1 for (s2, e2) in busy.get((p, gt), [])
-                          if s2 < en and st < e2)
-            if overlap >= cap:
-                continue
+        _dur_h = dur.total_seconds() / 3600.0
+        for _gov_on in (True, False):      # governed first, ungoverned fallback
+            if best is not None or (not _gov_on and GOV == "off"):
+                break
+            for pr in cand:
+                st = max(free.get(pr, t0), floor_ts)
+                if last_gt.get(pr) not in (None, gt):
+                    st = st + timedelta(seconds=mch_p[p])   # mould change
+                if _gov_on:
+                    st = _gov_start(p, gt, st, _dur_h)
+                    if st is None:
+                        continue
+                en = st + dur
+                # R3: at most `cap` presses may run this GT concurrently
+                overlap = sum(1 for (s2, e2) in busy.get((p, gt), [])
+                              if s2 < en and st < e2)
+                if overlap >= cap:
+                    continue
             # Prefer, among presses free at the same moment, one whose last GT
             # shares this rim: the mould change is then a same-size change
             # (PCR 22 vs 42 min on CONTI, 28 vs 60 on BJ) instead of a
             # different-size one. Strictly a TIEBREAK -- it never delays a
             # campaign, so it cannot cost fulfilment the way queue-ordering did.
-            same_rim = 0 if (last_gt.get(pr) is not None and _rim.get(last_gt.get(pr), "@") == _rim.get(gt, "#")) else 1
+                same_rim = 0 if (last_gt.get(pr) is not None and _rim.get(last_gt.get(pr), "@") == _rim.get(gt, "#")) else 1
             # TRIED AND REVERTED: adding per-press mould-change cost as a
             # tiebreak here (st, same_rim, mcost, pr). It made things WORSE --
             # PCR changes 98 -> 110, mould-hours 1,130 -> 1,225, fulfilment
             # 98.4 -> 98.0%. A cheap-to-change press attracts every GT, so work
             # spreads over more presses and creates more changes than the
             # cheaper rate saves. Press CONTINUITY dominates press RATE.
-            if best is None or (st, same_rim, pr) < (best[0], best[3], best[1]):
-                best = (st, pr, en, same_rim)
+                if best is None or (st, same_rim, pr) < (best[0], best[3], best[1]):
+                    best = (st, pr, en, same_rim)
         if best is None:
             # every eligible press is mould-blocked -- defer behind the earliest
             # concurrent run rather than breaking R3
@@ -578,8 +600,8 @@ def main() -> None:
                     changes += 1
                 free[pr] = en                    # press stays busy into next month
                 last_gt[pr] = gt
+                _gov_commit(p, gt, st, en)
                 busy.setdefault((p, gt), []).append((st, en))
-                _takt_commit(p, gt, st, en)
                 placed.append({"plant": p, "gt_code": gt,
                                "mould_set": j["mould_set"], "press": pr,
                                "start_ts": st, "end_ts": en, "qty": j["qty"],
@@ -595,8 +617,8 @@ def main() -> None:
                     changes += 1
                 free[pr] = en
                 last_gt[pr] = gt
+                _gov_commit(p, gt, st, en)
                 busy.setdefault((p, gt), []).append((st, en))
-                _takt_commit(p, gt, st, en)
                 placed.append({"plant": p, "gt_code": gt,
                                "mould_set": j["mould_set"], "press": pr,
                                "start_ts": st, "end_ts": en, "qty": float(can),
@@ -612,8 +634,8 @@ def main() -> None:
             changes += 1
         free[pr] = en
         last_gt[pr] = gt
+        _gov_commit(p, gt, st, en)
         busy.setdefault((p, gt), []).append((st, en))
-        _takt_commit(p, gt, st, en)
         if floor_ts <= t0:                      # this campaign spent stock budget
             early_budget[(p, gt)] = max(
                 0.0, early_budget.get((p, gt), 0.0) - gap_tyres[p])
@@ -662,6 +684,9 @@ def main() -> None:
                                    remaining / max(rate, 1e-9)))
             if last_gt.get(pr) not in (None, gt):
                 st = st + timedelta(seconds=mch_p[p])
+            _gst = _gov_start(p, gt, st, remaining / max(rate, 1e-9))
+            if _gst is not None:
+                st = _gst
             gap_h = (horizon - st).total_seconds() / 3600.0
             if gap_h <= 0:
                 continue
@@ -687,8 +712,8 @@ def main() -> None:
                 changes += 1
             free[pr] = en
             last_gt[pr] = gt
+            _gov_commit(p, gt, st, en)
             busy.setdefault((p, gt), []).append((st, en))
-            _takt_commit(p, gt, st, en)
             placed.append({"plant": p, "gt_code": gt, "mould_set": j["mould_set"],
                            "press": pr, "start_ts": st, "end_ts": en,
                            "qty": round(take, 1),
@@ -699,7 +724,12 @@ def main() -> None:
             still.append({**j, "qty": round(remaining, 1)})
     unplaced = still
     print(f"  backfill: recovered {recovered:,.0f} tyres by splitting into "
-          f"available gaps ({len(still)} campaigns still short)\n")
+          f"available gaps ({len(still)} campaigns still short)")
+    if GOV != "off":
+        print(f"  governor: {_gov_blocked[0]} (campaign, press) probes found no "
+              f"window and fell back to ungoverned placement\n")
+    else:
+        print()
 
     cp = pl.DataFrame(placed)
     up = pl.DataFrame(unplaced) if unplaced else pl.DataFrame(

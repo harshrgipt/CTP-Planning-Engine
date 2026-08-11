@@ -38,8 +38,9 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
 
@@ -122,7 +123,7 @@ def main() -> None:
               for r in mo.iter_rows(named=True)}
     pmc = pl.read_parquet(D / "press_mould_change.parquet")
     mould_h = float(pmc["mould_change_min"].median()) / 60.0
-    sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     rim = {r["gt_code"]: r["rim"] for r in sz.iter_rows(named=True)
            if r.get("gt_code")}
     ctx = {"cost": cost, "need": need, "mould_h": mould_h, "rim": rim}

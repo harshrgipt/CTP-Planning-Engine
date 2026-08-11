@@ -55,10 +55,11 @@ from datetime import timedelta
 from pathlib import Path
 
 import polars as pl
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
 D = ROOT / "warehouse" / "derived"
-INP = ROOT.parent.parent / "INPUT" / "derived"
+INP = paths.INPUT_DERIVED
 SHIFT_H = 8
 
 # BOM child_desc -> keywords that identify it in `Ageing spec-20.01.2024 rev12`.

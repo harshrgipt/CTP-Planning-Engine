@@ -24,10 +24,11 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 from openpyxl import load_workbook                            # noqa: E402
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT.parent.parent
-OUT = SRC / "INPUT"
+SRC = paths.RAW
+OUT = paths.INPUT
 
 # underscore-, slash-, space- and dash-delimited.  NOT \b -- see module docstring.
 TTTL = re.compile(r"(?:^|[\s_/\-])(TT|TL)(?:$|[\s_/\-])", re.I)
@@ -81,7 +82,7 @@ def main() -> None:
 
     # ---- 2. TT / TL  (R8) -----------------------------------------------
     rec = []
-    rows = sheet(SRC / "TBR BUILDING ALLOWABLE MATRIX.xlsx",
+    rows = sheet(paths.raw("TBR BUILDING ALLOWABLE MATRIX.xlsx"),
                  "SKU-MACHINE-CONSTRUCTION")
     h = [str(x) if x else "" for x in rows[0]]
     ig, isk, idc = h.index("GT CODE"), h.index("SKU CODE"), h.index("DESCRIPTION")
@@ -91,7 +92,7 @@ def main() -> None:
         rec.append({"plant": "TBR", "gt_code": str(r[ig]).strip(),
                     "sku": str(r[isk] or "").strip(),
                     "descr": str(r[idc] or ""), "src": "TBR allowable matrix"})
-    mo = pl.read_csv(SRC / "Master_Mapping_Mould_SKU.csv", infer_schema_length=0)
+    mo = pl.read_csv(paths.raw("Master_Mapping_Mould_SKU.csv"), infer_schema_length=0)
     for x in mo.iter_rows(named=True):
         rec.append({"plant": "", "gt_code": "", "sku": str(x["Matl.Code"] or ""),
                     "descr": str(x["Matl.Description"] or ""),
@@ -115,7 +116,7 @@ def main() -> None:
                 "status": f"{sz.height} rows, {sz['rim'].n_unique()} rims"})
 
     # ---- 4. aging limits per SKU  (R5, R17) -----------------------------
-    rows = sheet(SRC / "Recipemaster 1.xlsx")
+    rows = sheet(paths.raw("Recipemaster 1.xlsx"))
     h = [str(x) if x else "" for x in rows[0]]
     def col(n):
         return h.index(n) if n in h else None

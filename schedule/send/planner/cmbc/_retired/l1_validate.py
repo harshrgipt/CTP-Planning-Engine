@@ -30,11 +30,12 @@ from pathlib import Path
 import polars as pl
 
 from planner.config import GT_SHELF_LIFE_H
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-SRC = ROOT.parent.parent
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
+SRC = paths.RAW
 D = ROOT / "warehouse" / "derived"
-INP = SRC / "INPUT" / "derived"
+INP = paths.INPUT_DERIVED
 OUT = ROOT / "warehouse" / "derived"
 
 FINDINGS: list[dict] = []
@@ -115,8 +116,8 @@ def validate(month: str) -> tuple[pl.DataFrame, dict]:
                     f"e.g. {sorted(miss)[:2]}", len(miss), "R3")
 
     # ---- 4. mould master (R3, R14) --------------------------------------
-    mapf = SRC / "curing_item_mould_mapping 2.csv"
-    invf = SRC / "mould_inv_ctp_17072026.csv"
+    mapf = paths.raw("curing_item_mould_mapping 2.csv")
+    invf = paths.raw("mould_inv_ctp_17072026.csv")
     if not (mapf.exists() and invf.exists()):
         add("ERROR", "mould.master", "mould mapping or inventory missing", rule="R3")
     else:

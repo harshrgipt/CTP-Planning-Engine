@@ -35,9 +35,10 @@ from pathlib import Path
 import polars as pl
 
 from planner.data.warehouse import duck
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT.parent.parent / "INPUT" / "derived" / "machine_rim_lock.parquet"
+OUT = paths.INPUT_DERIVED / "machine_rim_lock.parquet"
 
 Q = """
 SELECT plant, machineCode AS machine, itemCode AS gt, count(*) AS n
@@ -48,7 +49,7 @@ GROUP BY 1, 2, 3
 
 
 def main() -> None:
-    sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     rim = {r["gt_code"]: str(r["rim"]) for r in sz.iter_rows(named=True)
            if r.get("gt_code") and r.get("rim")}
     rows = duck().execute(Q).fetchall()

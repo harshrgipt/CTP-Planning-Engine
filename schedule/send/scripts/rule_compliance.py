@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
 D = ROOT / "warehouse" / "derived"
@@ -82,7 +83,7 @@ def main():
     # of changes landing on the same rim would be sum(share_r^2) over the rim
     # mix. Reporting same_rim without it is unreadable -- 53% means nothing
     # until you know whether random would have given 20% or 50%.
-    _sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    _sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     _rim = {r["gt_code"]: r["rim"] for r in _sz.iter_rows(named=True) if r.get("gt_code")}
     _mix = camp.with_columns(pl.col("gt_code").replace_strict(_rim, default=None).alias("_r"))
     _chance = 0.0

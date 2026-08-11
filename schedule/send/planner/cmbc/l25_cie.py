@@ -37,11 +37,12 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-SRC = ROOT.parent.parent
+SRC = paths.RAW
 D = ROOT / "warehouse" / "derived"
-INP = SRC / "INPUT" / "derived"
+INP = paths.INPUT_DERIVED
 PARAMS = ROOT / "warehouse" / "params"
 
 
@@ -52,7 +53,7 @@ def mould_sets(dem: pl.DataFrame) -> pl.DataFrame:
     different presses. The component is therefore the capacity unit for L4.5,
     not the individual GT.
     """
-    mp = pl.read_csv(SRC / "curing_item_mould_mapping 2.csv", infer_schema_length=0)
+    mp = pl.read_csv(paths.raw("curing_item_mould_mapping 2.csv"), infer_schema_length=0)
     gs = dem.select(["plant", "gt_code", "sku"]).unique()
     j = gs.join(mp.select(["Item_Code", "Mold_Name"]),
                 left_on="sku", right_on="Item_Code", how="inner")

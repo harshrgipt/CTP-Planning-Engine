@@ -32,8 +32,9 @@ import polars as pl
 from planner.config import CONFIG
 from planner.data.warehouse import duck, set_cutoff
 from planner.runs.logger import log
+from planner import paths
 
-RM = Path("C:/Users/91810/Downloads/send/Recipemaster 1.xlsx")
+RM = paths.raw("Recipemaster 1.xlsx")
 
 
 def _c(x) -> str:

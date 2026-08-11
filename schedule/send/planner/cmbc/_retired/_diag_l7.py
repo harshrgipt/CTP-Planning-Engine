@@ -63,8 +63,20 @@ import numpy as np
 import polars as pl
 
 from planner.config import CONFIG, GT_SHELF_LIFE_H
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+_DIAG_R: list = []
+_DIAG_LAST: list = []
+_DIAG_NCAND: list = [0]
+_DIAG_FREE: list = [0.0]
+_DIAG_LO: list = [0.0]
+_DIAG_SPLIT: list = [0, 0, 0]
+# DIAG-ONLY EXPERIMENT: allow a single atomic SLICE to be halved before starving.
+DIAG_SLICE_SPLIT_MIN = float(os.environ.get('DIAG_SLICE_SPLIT_MIN', '0'))  # 0 = off
+_diag_splits = {'PCR': 0, 'TBR': 0}
+
+
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
 
@@ -142,7 +154,6 @@ CO_PER_MDAY = CONFIG.thresholds.plant_co_per_machine_day  # config = single sour
 # Run size as a multiple of the B12 floor (PCR 150 / TBR 70). The floor is a
 # LOWER BOUND on the time-supply lot, not the lot itself.
 RUN_MULT = float(os.environ.get("PLANNER_RUN_MULT", "1.0"))
-_B16_HARD = os.environ.get("PLANNER_B16_HARD", "0") != "0"
 
 # How many replenishment intervals of CURE DEMAND one run may absorb.
 # DEFAULTS OFF (large). Capping at 1.0 x T does cut inventory 6,946 -> 6,285, but
@@ -177,17 +188,6 @@ SUBFLOOR_BUDGET = {
     "TBR": int(os.environ.get("PLANNER_SUBFLOOR_TBR", "400")),   # plant-matched 33.5 %
 }
 # "0" = plant-calibrated budget (default) · "1" = absolute gate · "off" = no floor
-# Allow ONE halving of an atomic (single-slice) run, charged to the same B12
-# budget. Split-before-starve otherwise terminates at `len(grp) == 1` and the
-# budget never gets spent -- 180 available, ~9 used, 27,203 tyres starved.
-# PCR ONLY, BY MEASUREMENT. On PCR it is worth +1.09 pt July / +1.04 pt August.
-# On TBR the SAME change is worth -2.01 pt July / -1.05 pt August: TBR runs are
-# already at the floor (p50 86 against a floor of 70), so halving an atomic
-# slice there produces two fragments that BOTH fail to place -- starved groups
-# 158 -> 298 while starved volume rose 4,482 -> 6,457. Negative on both months,
-# so TBR is excluded (DO-NOT 15: a rule tuned on PCR does not transfer to TBR).
-ATOMIC_SPLIT_PLANTS = {x for x in os.environ.get(
-    "PLANNER_ATOMIC_SPLIT_PLANTS", "PCR").split(",") if x}
 _HF = os.environ.get("PLANNER_HARD_FLOOR", "budget")
 HARD_FLOOR = _HF == "1"
 NO_FLOOR = _HF == "off"
@@ -371,10 +371,10 @@ def main() -> None:
     camp = pl.read_parquet(run / "cure_campaigns.parquet")
     cm = pl.read_parquet(D / f"cap_machine_{a.month}.parquet")
     grp = pl.read_parquet(D / f"cap_ttl_groups_{a.month}.parquet")
-    tt = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "tt_tl.parquet")
+    tt = pl.read_parquet(paths.INPUT_DERIVED / "tt_tl.parquet")
     # Rim per GT, for size-aware machine selection (R6/R7). The plant's
     # changeover master is BINARY: same size 22-28 min, different size 42-60.
-    _sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    _sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     rim_of = {r["gt_code"]: str(r["rim"]) for r in _sz.iter_rows(named=True)
               if r.get("gt_code") and r.get("rim")}
     dem = pl.read_parquet(ROOT / "masters" / "demand" / f"demand_{a.month}.parquet")
@@ -441,8 +441,7 @@ def main() -> None:
         """Eligible machines for a GT, inside its TT/TL group where B16 applies."""
         e = elig.get((p, gt), [])
         if p == "TBR" and gt_tag.get(gt):
-            _f = [x for x in e if group_of.get(x) == gt_tag[gt]]
-            e = _f if (_f or _B16_HARD) else e
+            e = [x for x in e if group_of.get(x) == gt_tag[gt]] or e
         return e
 
     def _n_elig(p: str, gt: str) -> int:
@@ -527,7 +526,7 @@ def main() -> None:
     # eligibility penalty, and counted in the "spilled past their pin" report.
     _tier_rank = {"hard": 0, "primary": 1, "flex": 2}
     lock_of: dict[tuple, list] = {}          # (plant, rim) -> machines, best first
-    _lockf = ROOT.parent.parent / "INPUT" / "derived" / "machine_rim_lock.parquet"
+    _lockf = paths.INPUT_DERIVED / "machine_rim_lock.parquet"
     if _lockf.exists():
         for r in (pl.read_parquet(_lockf)
                   .sort(["plant", "locked_rim", "tier", "rank"])
@@ -648,7 +647,7 @@ def main() -> None:
     # An earlier per-GT pin failed, but it pinned by capacity and penalty -- an
     # assignment we invented. This is the plant's own, feasible by construction.
     home_of: dict[tuple, list] = {}
-    _homef = ROOT.parent.parent / "INPUT" / "derived" / "gt_home_machine.parquet"
+    _homef = paths.INPUT_DERIVED / "gt_home_machine.parquet"
     if _homef.exists():
         for r in (pl.read_parquet(_homef).sort(["plant", "gt_code", "rank"])
                   .iter_rows(named=True)):
@@ -667,7 +666,7 @@ def main() -> None:
     # GTs (100 % TBR) on exactly ONE machine, against the plant's 66.7 %, with
     # every GT capacity-feasible and one machine carrying two sizes.
     part_of: dict[tuple, list] = {}
-    _partf = ROOT.parent.parent / "INPUT" / "derived" / "gt_machine_partition.parquet"
+    _partf = paths.INPUT_DERIVED / "gt_machine_partition.parquet"
     if USE_PARTITION and _partf.exists():
         _pf = pl.read_parquet(_partf)
         # STALENESS GUARD. The partition is sized against ONE month's demand and
@@ -1175,6 +1174,8 @@ def main() -> None:
 
     def _place(p: str, gt: str, cand: list, grp: list, cap_h: float) -> bool:
             """Place one run whole. False if no machine can take it."""
+            _DIAG_R.clear()
+            _DIAG_NCAND[0] = len(cand)
             gq = sum(d["qty"] for d in grp)
             t_first = grp[0]["t_cure"]
             # Cumulative tyres AFTER each slice: slice j is off the machine once
@@ -1201,27 +1202,18 @@ def main() -> None:
             # HORIZON LOCK keeps the spill inside the rim's own machine group,
             # which is what the plant does. Measured: last_gt ordering left 24.4%
             # of PCR volume off-lock.
-            # LOAD-AWARE THIRD KEY -- committed hours, AFTER lock and rim.
-            # `PIN_RUNS` defaults to 1 and `break`s on the first feasible
-            # machine, so the "prefer the latest feasible release" preference
-            # below it is dead code and the candidate ORDER is the only lever
-            # left. Ordering the remaining ties by how much work a machine has
-            # already been given spreads runs onto the idle end of each rim
-            # group instead of re-filling the machine that happens to sit first
-            # in the list. Strictly a tie-break: it never overrides the lock or
-            # the same-rim preference, so it cannot cost same-size %.
             _r = rim_of.get(gt)
-            _lkset = set(_locked(p, gt))
-            _idx = {m: i for i, m in enumerate(cand)}
-            _load = {m: sum((e - s).total_seconds()
-                            for (s, e, _g, _rr) in busy.get(m, []))
-                     for m in cand}
-            cand = sorted(cand, key=lambda x: (
-                x not in _lkset,
-                rim_of.get(last_gt.get(x, ""), None) != _r if _r is not None
-                else False,
-                _load.get(x, 0.0),
-                _idx[x]))
+            if _r is not None:
+                _lkset = set(_locked(p, gt))
+                _bal = os.environ.get("DIAG_BALANCE", "0") != "0"
+                _committed = {mm: sum((e2 - s2).total_seconds()
+                                      for (s2, e2, _g3, _r3) in busy.get(mm, []))
+                              for mm in cand}
+                cand = sorted(cand, key=lambda x: (
+                    x not in _lkset,
+                    rim_of.get(last_gt.get(x, ""), None) != _r,
+                    _committed[x] if _bal else 0.0,
+                    cand.index(x)))
             # TRIED AND REVERTED: preferring a machine whose `last_gt` is this GT,
             # to recover the continuity that GT-ordered placement gave for free.
             # It does the opposite -- machines/GT 4 -> 5 and changeovers
@@ -1269,6 +1261,7 @@ def main() -> None:
                         st = ivs - timedelta(seconds=need_before) - dur
                 en = st + dur
                 if st < t0:
+                    _DIAG_R.append("release_before_t0")
                     continue
                 # EARLINESS CAP -- building early is not free.
                 # The backward walk was the ONLY response to a busy machine, and
@@ -1279,6 +1272,7 @@ def main() -> None:
                 # next candidate is tried instead. The caller retries uncapped if
                 # no machine passes, so this can never cost a placement.
                 if (ideal - st).total_seconds() / 3600.0 > cap_h:
+                    _DIAG_R.append("earliness_cap")
                     continue
                 # R5 ON EVERY SLICE, NOT ON THE RUN.
                 # Checking `t_last - run_end` looked at the wrong endpoint: when
@@ -1288,6 +1282,7 @@ def main() -> None:
                             .total_seconds() / 3600.0
                             for d, cu in zip(grp, cums))
                 if worst > GT_SHELF_LIFE_H:
+                    _DIAG_R.append("R5_shelf_life")
                     continue
                 # HARD CAP: would this placement breach the stock envelope?
                 _cum, _adds = 0.0, []
@@ -1296,6 +1291,7 @@ def main() -> None:
                     _adds.append((st + timedelta(seconds=cu * c),
                                   d["t_cure"], d["qty"]))
                 if not _cap_ok(p, _adds):
+                    _DIAG_R.append("wip_rail")
                     continue
                 if PIN_RUNS:
                     best = (mach, c, st, en)   # first feasible keeps the run whole
@@ -1306,6 +1302,50 @@ def main() -> None:
                                           / 3600.0, best[0]):
                     best = (mach, c, st, en)
             if best is None:
+                _DIAG_LAST.clear()
+                _DIAG_LAST.extend(_DIAG_R)
+                # FREE-WINDOW PROBE: was a legal contiguous slot actually free
+                # on ANY candidate machine at this instant?  Window is bounded
+                # below by t0 and by R5 (the run may not finish >72 h before its
+                # own cures) and above by the latest admissible start.
+                _bf = 0.0
+                _DIAG_SPLIT[0] = _DIAG_SPLIT[1] = _DIAG_SPLIT[2] = 0
+                for _mm in cand:
+                    _c = cad_s.get(_mm, plant_cad[p])
+                    _durs = gq * _c
+                    _id = min(d["t_cure"] - timedelta(hours=tau_rel[p])
+                              - timedelta(seconds=cu * _c)
+                              for d, cu in zip(grp, cums))
+                    _lo = max([t0] + [d["t_cure"] - timedelta(hours=GT_SHELF_LIFE_H)
+                                      - timedelta(seconds=cu * _c)
+                                      for d, cu in zip(grp, cums)])
+                    _hi = _id + timedelta(seconds=_durs)
+                    if _hi <= _lo:
+                        continue
+                    # EXACT: every free gap must also carry the setup on BOTH
+                    # sides, exactly as the backward walk requires.
+                    _iv = sorted(busy.get(_mm, []), key=lambda x: (x[0], x[1]))
+                    _bounds = [(t0 - timedelta(days=400), t0 - timedelta(days=400), None, None)]                         + _iv + [(t0 + timedelta(days=400), t0 + timedelta(days=400), None, None)]
+                    _mx = 0.0
+                    for _k in range(len(_bounds) - 1):
+                        _pg = _bounds[_k][2]
+                        _ng = _bounds[_k + 1][2]
+                        _ga = max(_bounds[_k][1], _lo)
+                        _gb = min(_bounds[_k + 1][0], _hi)
+                        if _gb <= _ga:
+                            continue
+                        _need = _durs
+                        if _pg is not None and _bounds[_k][1] >= _lo:
+                            _need += _setup_s(p, _mm, _pg, gt)
+                        if _ng is not None and _bounds[_k + 1][0] <= _hi:
+                            _need += _setup_s(p, _mm, gt, _ng)
+                        _mx = max(_mx, (_gb - _ga).total_seconds() / max(_need, 1e-9) * _durs)
+                        for _fi, _fr in enumerate((0.5, 0.25, 0.125)):
+                            _n2 = _need - _durs + _durs * _fr
+                            if (_gb - _ga).total_seconds() >= _n2:
+                                _DIAG_SPLIT[_fi] = 1
+                    _bf = max(_bf, _mx / max(_durs, 1e-9))
+                _DIAG_FREE[0] = _bf
                 return False
             mach, c, st, en = best
             busy.setdefault(mach, []).append((st, en, gt, rim_of.get(gt, "")))
@@ -1448,42 +1488,44 @@ def main() -> None:
                 heapq.heappush(heap, (_half[0]["t_cure"], sc, _seq, p, gt,
                                       cand, _half))
                 _seq += 1
-            continue
-        # ATOMIC SLICE -- ONE HALVING, CHARGED TO THE SAME BUDGET.
-        # Split-before-starve terminated at `len(grp) == 1`: a run that is a
-        # SINGLE slice has no boundary to cut on, so it went straight to
-        # `no feasible release`. That is where the volume was going -- 27,203
-        # PCR tyres in August against a sub-floor budget of 180 that had spent
-        # about 9. The budget was not binding; the geometry was.
-        # A slice is a delivery to a press, not a physical indivisible unit
-        # (PARTITION §4f), so it may be cut once. ONCE only: the halves carry
-        # `_split1` and are never cut again, which bounds the recursion and
-        # keeps the fragment size honest. Charged to the same plant-calibrated
-        # B12 budget, so this cannot make us looser than the plant.
-        if (p in ATOMIC_SPLIT_PLANTS and len(grp) == 1
-                and not grp[0].get("_split1")
-                and not HARD_FLOOR
-                and _subfloor_spent[p] < SUBFLOOR_BUDGET.get(p, 0)):
-            _q = int(grp[0]["qty"])
-            _a, _b = _q // 2, _q - _q // 2
-            if _a >= 1 and _b >= 1:
-                _subfloor_spent[p] += 1
-                for _qq in (_a, _b):
-                    _d2 = dict(grp[0])
-                    _d2["qty"] = float(_qq)      # integral -- never fractional
-                    _d2["_split1"] = True
-                    heapq.heappush(heap, (_d2["t_cure"], sc, _seq, p, gt,
-                                          cand, [_d2]))
-                    _seq += 1
-                continue
-        if True:
+        elif DIAG_SLICE_SPLIT_MIN > 0 and len(grp) == 1                 and grp[0]["qty"] >= 2 * DIAG_SLICE_SPLIT_MIN                 and _subfloor_spent[p] < SUBFLOOR_BUDGET.get(p, 0):
+            # EXPERIMENT: a slice is a DELIVERY with no minimum of its own
+            # (this file's own doctrine).  Halve it and re-queue both halves at
+            # the same deadline; charge one sub-floor setup from the B12 budget.
+            _subfloor_spent[p] += 1
+            _diag_splits[p] += 1
+            _q = grp[0]["qty"]
+            _h1 = round(_q / 2.0)
+            for _qq in (_h1, _q - _h1):
+                heapq.heappush(heap, (grp[0]["t_cure"], sc, _seq, p, gt, cand,
+                                      [{**grp[0], "qty": float(_qq)}]))
+                _seq += 1
+        else:
             for _d in grp:
+                from collections import Counter as _C
+                _cnt = _C(_DIAG_LAST)
                 starved.append({"plant": p, "gt_code": gt,
                                 "press": _d["press"], "qty": _d["qty"],
                                 "reason": ("would breach min_lot"
                                            if len(grp) > 1 else
-                                           "no feasible release")})
+                                           "no feasible release"),
+                                "why": ("|".join(f"{k}={v}" for k, v in sorted(_cnt.items()))
+                                        or "NO_CANDIDATES"),
+                                "why_set": ("|".join(sorted(_cnt)) or "NO_CANDIDATES"),
+                                "ncand": _DIAG_NCAND[0],
+                                "nslices": len(grp),
+                                "free_ratio": round(_DIAG_FREE[0], 3),
+                                "fits_half": bool(_DIAG_SPLIT[0]),
+                                "fits_quarter": bool(_DIAG_SPLIT[1]),
+                                "fits_eighth": bool(_DIAG_SPLIT[2]),
+                                "t_cure": _d["t_cure"]})
 
+    print(f"  [DIAG] subfloor budget spent: {_subfloor_spent} of {SUBFLOOR_BUDGET}  slice-splits {_diag_splits}")
+    from collections import Counter as _C2
+    _rc = _C2()
+    for _s in starved:
+        _rc[(_s["plant"], _s["reason"], _s.get("nslices"))] += 1
+    print(f"  [DIAG] starved groups by (plant, reason, n_slices_in_group): {dict(_rc)}")
     bs = pl.DataFrame(slices)
     st_df = pl.DataFrame(starved) if starved else pl.DataFrame(
         schema={"plant": pl.Utf8, "gt_code": pl.Utf8, "qty": pl.Float64,
@@ -1510,7 +1552,7 @@ def main() -> None:
     ], how="vertical").sort(["plant", "machine", "start_ts"])
 
     bs.write_parquet(run / "build_schedule.parquet")
-    st_df.write_parquet(run / "build_starved.parquet")
+    st_df.write_parquet(run / "build_starved_diag.parquet")
     # NEVER SILENT (§12). A rim that left its lock says so, with how much.
     if spill_to:
         print("\n  RIM SPILL USED")

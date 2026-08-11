@@ -34,6 +34,8 @@ schedule/send/runs/*
 schedule/send/output/*
 !schedule/send/output/AUG2026_pack/
 !schedule/send/output/JUL2026_pack/
+!schedule/send/output/V2_AUG2026_pack/
+!schedule/send/output/V2_JUL2026_pack/
 
 # Excel lock files -- created whenever someone opens a workbook.
 ~$*

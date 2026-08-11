@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from planner.cmbc.l11_validate_plan import arm_is_stale  # noqa: E402
 from planner.config import CONFIG  # noqa: E402
+from planner import paths
 
 # B12 lot floor. PARTITION §8: every enforced cap lives in `config.py` and is
 # read from there -- "add a cap in config.py or nowhere". Do NOT restate 150/70.
@@ -159,7 +160,7 @@ def main() -> int:
     req = pl.read_parquet(ROOT / "warehouse" / "derived" /
                           f"net_requirement_{month}.parquet")
     dem = pl.read_parquet(ROOT / "masters" / "demand" / f"demand_{month}.parquet")
-    sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     rim = {r["gt_code"]: str(r["rim"]) for r in sz.iter_rows(named=True)
            if r.get("gt_code") and r.get("rim")}
 

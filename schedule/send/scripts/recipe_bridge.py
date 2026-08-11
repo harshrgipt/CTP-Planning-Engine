@@ -31,9 +31,10 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 from openpyxl import load_workbook                            # noqa: E402
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT.parent.parent
+SRC = paths.RAW
 OUT = ROOT / "warehouse" / "derived"
 
 
@@ -53,8 +54,8 @@ def sheet_df(path: Path) -> pl.DataFrame:
 
 
 def main() -> None:
-    rm = sheet_df(SRC / "Recipemaster 1.xlsx")
-    rl = sheet_df(SRC / "recipelookup 1.xlsx")
+    rm = sheet_df(paths.raw("Recipemaster 1.xlsx"))
+    rl = sheet_df(paths.raw("recipelookup 1.xlsx"))
     print(f"recipemaster {rm.height} rows   recipelookup {rl.height} rows")
 
     rm = rm.select(["iD", "SAPMaterialCode", "description", "tyreSize",

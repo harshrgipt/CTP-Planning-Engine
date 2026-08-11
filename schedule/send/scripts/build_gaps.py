@@ -31,12 +31,13 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 import pdfplumber                                             # noqa: E402
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT.parent.parent
+SRC = paths.RAW
 OUT = ROOT / "warehouse" / "derived"
-INP = SRC / "INPUT" / "derived"
-PDF = SRC / "Ageing spec-20.01.2024 (2).pdf"
+INP = paths.INPUT_DERIVED
+PDF = paths.raw("Ageing spec-20.01.2024 (2).pdf")
 
 # machine number -> (min inch, max inch, source)
 PCR_INCH = {1: (12, 20, "spec"), 2: (12, 20, "spec"),
@@ -90,7 +91,7 @@ def pcr_rim_map() -> dict[str, int]:
     ALL PCR CTP SKUS.xlsx as a tyre size ("145 R 12").  Parsing the GT code
     itself yields nothing, which is why the first run returned an empty test."""
     from openpyxl import load_workbook
-    wb = load_workbook(SRC / "ALL PCR CTP SKUS.xlsx", read_only=True)
+    wb = load_workbook(paths.raw("ALL PCR CTP SKUS.xlsx"), read_only=True)
     rows = list(wb["pcr skus running in ctp"].iter_rows(values_only=True))
     wb.close()
     out: dict[str, int] = {}
@@ -191,7 +192,7 @@ def main() -> None:
 
     # ---- GAP-12 ---------------------------------------------------------
     og = ROOT / "masters" / "opening_gt"
-    d = SRC / "INPUT" / "opening_gt"
+    d = paths.OPENING_GT
     d.mkdir(parents=True, exist_ok=True)
     n = 0
     for p in og.glob("*"):

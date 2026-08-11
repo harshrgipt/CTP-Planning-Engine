@@ -44,9 +44,10 @@ import numpy as np
 import polars as pl
 
 from planner.data.warehouse import duck
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-DER = ROOT.parent.parent / "INPUT" / "derived"
+DER = paths.INPUT_DERIVED
 OUT = DER / "gt_machine_partition.parquet"
 MONTH = sys.argv[1] if len(sys.argv) > 1 else "2026-07"
 

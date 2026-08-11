@@ -65,6 +65,7 @@ import polars as pl
 
 from planner.cmbc import plant_ct
 from planner.config import CONFIG, GT_SHELF_LIFE_H
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -728,10 +729,10 @@ def main() -> None:
     camp = pl.read_parquet(run / "cure_campaigns.parquet")
     cm = pl.read_parquet(D / f"cap_machine_{a.month}.parquet")
     grp = pl.read_parquet(D / f"cap_ttl_groups_{a.month}.parquet")
-    tt = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "tt_tl.parquet")
+    tt = pl.read_parquet(paths.INPUT_DERIVED / "tt_tl.parquet")
     # Rim per GT, for size-aware machine selection (R6/R7). The plant's
     # changeover master is BINARY: same size 22-28 min, different size 42-60.
-    _sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    _sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     rim_of = {r["gt_code"]: str(r["rim"]) for r in _sz.iter_rows(named=True)
               if r.get("gt_code") and r.get("rim")}
     # ---- SISTER GROUPS: GTs differing in exactly ONE component slot -------
@@ -757,7 +758,7 @@ def main() -> None:
     # 8 component columns and nulls `rim_dia` with a bad cast (see MEMORY §10q).
     # The data is fine; the SIMILARITY is what is absent.
     sister_of: dict[str, str] = {}
-    _sisf = ROOT.parent.parent / "INPUT" / "derived" / "gt_sister_group.parquet"
+    _sisf = paths.INPUT_DERIVED / "gt_sister_group.parquet"
     if _sisf.exists():
         for _r in pl.read_parquet(_sisf).iter_rows(named=True):
             sister_of[_r["gt_code"]] = str(_r["sister_id"])
@@ -784,7 +785,7 @@ def main() -> None:
     # reconciliation. gt_size wins ties because it is the master the rest of the
     # engine prices against.
     rim_key_of: dict[tuple, str] = {}
-    _clf = ROOT.parent.parent / "INPUT" / "derived" / "sku_con_cluster.parquet"
+    _clf = paths.INPUT_DERIVED / "sku_con_cluster.parquet"
     if _clf.exists():
         for _r in pl.read_parquet(_clf).iter_rows(named=True):
             if _r.get("con_cluster"):
@@ -1003,7 +1004,7 @@ def main() -> None:
     # eligibility penalty, and counted in the "spilled past their pin" report.
     _tier_rank = {"hard": 0, "primary": 1, "flex": 2}
     lock_of: dict[tuple, list] = {}          # (plant, rim) -> machines, best first
-    _lockf = ROOT.parent.parent / "INPUT" / "derived" / "machine_rim_lock.parquet"
+    _lockf = paths.INPUT_DERIVED / "machine_rim_lock.parquet"
     if _lockf.exists():
         for r in (pl.read_parquet(_lockf)
                   .sort(["plant", "locked_rim", "tier", "rank"])
@@ -1107,8 +1108,7 @@ def main() -> None:
             _free_h: dict[tuple, float] = {}
             # The partition is read again further down; this block runs BEFORE
             # that, so it opens the file itself rather than reaching forward.
-            _partf2 = (ROOT.parent.parent / "INPUT" / "derived"
-                       / "gt_machine_partition.parquet")
+            _partf2 = (paths.INPUT_DERIVED / "gt_machine_partition.parquet")
             if USE_PARTITION and _partf2.exists():
                 _pf2 = pl.read_parquet(_partf2)
                 for _r2 in (_pf2.group_by(["plant", "machine"])
@@ -1197,7 +1197,7 @@ def main() -> None:
     # An earlier per-GT pin failed, but it pinned by capacity and penalty -- an
     # assignment we invented. This is the plant's own, feasible by construction.
     home_of: dict[tuple, list] = {}
-    _homef = ROOT.parent.parent / "INPUT" / "derived" / "gt_home_machine.parquet"
+    _homef = paths.INPUT_DERIVED / "gt_home_machine.parquet"
     if _homef.exists():
         for r in (pl.read_parquet(_homef).sort(["plant", "gt_code", "rank"])
                   .iter_rows(named=True)):
@@ -1218,7 +1218,7 @@ def main() -> None:
     part_of: dict[tuple, list] = {}
     part_book: dict[tuple, float] = {}   # (plant, gt, machine) -> booked hours
     part_done: dict[tuple, float] = {}   # ... -> hours actually placed so far
-    _partf = ROOT.parent.parent / "INPUT" / "derived" / "gt_machine_partition.parquet"
+    _partf = paths.INPUT_DERIVED / "gt_machine_partition.parquet"
     if USE_PARTITION and _partf.exists():
         _pf = pl.read_parquet(_partf)
         # STALENESS GUARD. The partition is sized against ONE month's demand and

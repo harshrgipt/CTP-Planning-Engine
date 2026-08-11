@@ -63,8 +63,9 @@ import numpy as np
 import polars as pl
 
 from planner.config import CONFIG, GT_SHELF_LIFE_H
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
 
@@ -359,10 +360,10 @@ def main() -> None:
     camp = pl.read_parquet(run / "cure_campaigns.parquet")
     cm = pl.read_parquet(D / f"cap_machine_{a.month}.parquet")
     grp = pl.read_parquet(D / f"cap_ttl_groups_{a.month}.parquet")
-    tt = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "tt_tl.parquet")
+    tt = pl.read_parquet(paths.INPUT_DERIVED / "tt_tl.parquet")
     # Rim per GT, for size-aware machine selection (R6/R7). The plant's
     # changeover master is BINARY: same size 22-28 min, different size 42-60.
-    _sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    _sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     rim_of = {r["gt_code"]: str(r["rim"]) for r in _sz.iter_rows(named=True)
               if r.get("gt_code") and r.get("rim")}
     dem = pl.read_parquet(ROOT / "masters" / "demand" / f"demand_{a.month}.parquet")
@@ -514,7 +515,7 @@ def main() -> None:
     # eligibility penalty, and counted in the "spilled past their pin" report.
     _tier_rank = {"hard": 0, "primary": 1, "flex": 2}
     lock_of: dict[tuple, list] = {}          # (plant, rim) -> machines, best first
-    _lockf = ROOT.parent.parent / "INPUT" / "derived" / "machine_rim_lock.parquet"
+    _lockf = paths.INPUT_DERIVED / "machine_rim_lock.parquet"
     if _lockf.exists():
         for r in (pl.read_parquet(_lockf)
                   .sort(["plant", "locked_rim", "tier", "rank"])
@@ -635,7 +636,7 @@ def main() -> None:
     # An earlier per-GT pin failed, but it pinned by capacity and penalty -- an
     # assignment we invented. This is the plant's own, feasible by construction.
     home_of: dict[tuple, list] = {}
-    _homef = ROOT.parent.parent / "INPUT" / "derived" / "gt_home_machine.parquet"
+    _homef = paths.INPUT_DERIVED / "gt_home_machine.parquet"
     if _homef.exists():
         for r in (pl.read_parquet(_homef).sort(["plant", "gt_code", "rank"])
                   .iter_rows(named=True)):
@@ -654,7 +655,7 @@ def main() -> None:
     # GTs (100 % TBR) on exactly ONE machine, against the plant's 66.7 %, with
     # every GT capacity-feasible and one machine carrying two sizes.
     part_of: dict[tuple, list] = {}
-    _partf = ROOT.parent.parent / "INPUT" / "derived" / "gt_machine_partition.parquet"
+    _partf = paths.INPUT_DERIVED / "gt_machine_partition.parquet"
     if USE_PARTITION and _partf.exists():
         _pf = pl.read_parquet(_partf)
         # STALENESS GUARD. The partition is sized against ONE month's demand and

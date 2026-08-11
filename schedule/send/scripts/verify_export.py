@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
 SHELF_H = 72.0
 SHIFT_START_H = 7
@@ -303,7 +304,7 @@ def main() -> int:
         print(f"  R5 re-derived {p}: max {wp.max():.1f} h  p95 {np.percentile(wp,95):.1f} h")
 
     # ---------- B16 TT/TL ---------------------------------------------------
-    tf = Path(__file__).resolve().parent.parent.parent.parent / "INPUT" / "derived" / "tt_tl.parquet"
+    tf = paths.INPUT_DERIVED / "tt_tl.parquet"
     if tf.exists():
         tt = pl.read_parquet(tf)
         dem_map = {}

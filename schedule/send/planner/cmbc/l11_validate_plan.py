@@ -39,6 +39,7 @@ import polars as pl
 
 from planner.config import CONFIG, GT_SHELF_LIFE_H
 from planner.data.warehouse import duck
+from planner import paths
 
 # G4 -- REAL per-machine changeover minutes, from the plant master. THE ONLY
 # place this verifier gets a changeover cost. Reading the master rather than
@@ -207,7 +208,7 @@ def main() -> None:
     # Rim per GT, for the size-mix invariants. The plant's changeover master is
     # BINARY -- same size vs different -- so the MIX is what sets setup time, and
     # a raw count cannot see it.
-    _sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    _sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     rim_of = {r["gt_code"]: str(r["rim"]) for r in _sz.iter_rows(named=True)
               if r.get("gt_code") and r.get("rim")}
 

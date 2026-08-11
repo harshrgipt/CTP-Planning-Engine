@@ -33,8 +33,9 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
 

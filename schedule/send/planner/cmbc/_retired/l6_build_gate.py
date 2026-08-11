@@ -45,8 +45,9 @@ import polars as pl
 from planner.cmbc import plant_ct
 
 from planner.config import GT_SHELF_LIFE_H
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
 BUCKET_H = 24.0                     # capacity is tested per day
@@ -67,7 +68,7 @@ def main() -> None:
     camp = pl.read_parquet(run / "cure_campaigns.parquet")
     cm = pl.read_parquet(D / f"cap_machine_{a.month}.parquet")
     grp = pl.read_parquet(D / f"cap_ttl_groups_{a.month}.parquet")
-    tt = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "tt_tl.parquet")
+    tt = pl.read_parquet(paths.INPUT_DERIVED / "tt_tl.parquet")
     dem = pl.read_parquet(ROOT / "masters" / "demand" / f"demand_{a.month}.parquet")
 
     # PLANT-MEDIAN cadence, kept ONLY as the fallback when a GT has no eligible

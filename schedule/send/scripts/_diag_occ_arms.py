@@ -10,9 +10,10 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-INP = ROOT.parent.parent / "INPUT" / "derived"
+INP = paths.INPUT_DERIVED
 LOCK = pl.read_parquet(INP / "machine_rim_lock.parquet")
 CAD = pl.read_parquet(INP / "cycle_time_building.parquet")
 

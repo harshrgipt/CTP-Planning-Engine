@@ -31,9 +31,10 @@ import polars as pl
 
 from planner.config import CONFIG
 from planner.data.warehouse import duck, set_cutoff
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-RM = ROOT.parent.parent / "Recipemaster 1.xlsx"
+RM = paths.raw("Recipemaster 1.xlsx")
 
 
 def _c(x) -> str:

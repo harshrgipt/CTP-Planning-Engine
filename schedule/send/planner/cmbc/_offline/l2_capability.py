@@ -42,13 +42,14 @@ import warnings
 from pathlib import Path
 
 import polars as pl
+from planner import paths
 
 warnings.filterwarnings("ignore")
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-SRC = ROOT.parent.parent
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
+SRC = paths.RAW
 D = ROOT / "warehouse" / "derived"
-INP = SRC / "INPUT" / "derived"
+INP = paths.INPUT_DERIVED
 
 # PCR inch capability, read off CTP Set up ...xlsx -> [PCR BUILDING].
 # Machines 6-11's upper bound is TRUNCATED in the source; 18 is inferred from
@@ -384,8 +385,8 @@ def main() -> None:
               f"full eligibility matrix, which OVERSTATES capacity")
     cp.write_parquet(D / f"cap_press_{a.month}.parquet")
 
-    mp = pl.read_csv(SRC / "curing_item_mould_mapping 2.csv", infer_schema_length=0)
-    inv = pl.read_csv(SRC / "mould_inv_ctp_17072026.csv", infer_schema_length=0)
+    mp = pl.read_csv(paths.raw("curing_item_mould_mapping 2.csv"), infer_schema_length=0)
+    inv = pl.read_csv(paths.raw("mould_inv_ctp_17072026.csv"), infer_schema_length=0)
     act = set(inv.filter(pl.col("CurrStat") == "ACTIVE")["Equnr"].to_list())
     per = (mp.with_columns(pl.col("Mold_Name").is_in(list(act)).alias("a"))
            .group_by("Item_Code").agg(pl.col("a").sum().cast(pl.Int64).alias("m")))

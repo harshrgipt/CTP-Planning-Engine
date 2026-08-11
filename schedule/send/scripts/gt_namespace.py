@@ -51,6 +51,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -130,7 +131,7 @@ def sku_to_gt() -> dict[str, tuple[str, str, int]]:
     from planner.data.warehouse import duck, set_cutoff
     set_cutoff(None)
     con = duck()
-    rm_path = ROOT.parent.parent / "Recipemaster 1.xlsx"
+    rm_path = paths.raw("Recipemaster 1.xlsx")
     wb = openpyxl.load_workbook(rm_path, read_only=True, data_only=True)
     raw = [[("".join(ch for ch in str(c) if ord(ch) < 128).strip()
              if c is not None else "") for c in r]

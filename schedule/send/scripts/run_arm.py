@@ -49,8 +49,16 @@ PY = sys.executable
 
 # L5 -> L11. L9 is skipped: it OVERWRITES cure_campaigns.parquet, which is L5's
 # own output, so running it makes the arm no longer describe the plan L5 built.
-STAGES = ["l5_cure_master", "l6_build_gate", "l7_pull_release",
-          "l8_prep_explosion", "l10_discretise", "l11_validate_plan"]
+#
+# L6 and L8 were dropped 2026-08-11 and moved to planner/cmbc/_retired/. L7 never
+# read l6_infeasible/l6_build_load (it runs its own B16 gate) and nothing at all
+# read prep_requirement. Verified on 2026-08: removing both leaves every plan
+# artefact bit-identical -- build_schedule, cure_campaigns, gt_events,
+# cure_campaigns_reconciled, build_starved, build_by_shift, cure_by_shift,
+# mould_changes and l11_invariants all compare equal, and the BTP pack matches
+# the shipped one on all 34 sheets.
+STAGES = ["l5_cure_master", "l7_pull_release", "l10_discretise",
+          "l11_validate_plan"]
 
 
 def run_arm(name: str, month: str, env_over: dict[str, str],

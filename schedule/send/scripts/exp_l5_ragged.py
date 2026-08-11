@@ -38,6 +38,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
 D = ROOT / "warehouse" / "derived"
@@ -234,7 +235,7 @@ def score(run: Path, rim: dict) -> dict:
 def main() -> None:
     month = sys.argv[1] if len(sys.argv) > 1 else "2026-07"
     floors = [float(x) for x in sys.argv[2:]] or [0.0, 0.4, 0.6, 0.8]
-    sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     rim = {r["gt_code"]: str(r["rim"]) for r in sz.iter_rows(named=True)
            if r.get("gt_code") and r.get("rim")}
     print(f"{'floor':>6}{'ng real':>9}{'unpl':>6}{'FULFIL':>9}"

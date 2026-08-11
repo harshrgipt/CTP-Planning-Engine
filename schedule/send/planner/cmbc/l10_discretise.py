@@ -39,6 +39,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 D = ROOT / "warehouse" / "derived"
@@ -66,7 +67,7 @@ def main() -> None:
         pl.col("machine") != "OPENING_STOCK")
     chg = pl.read_parquet(D / "cap_changeover.parquet")
     pmc = pl.read_parquet(D / "press_mould_change.parquet")
-    sz = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+    sz = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
     rim = {r["gt_code"]: r["rim"] for r in sz.iter_rows(named=True)
            if r.get("gt_code")}
 

@@ -114,6 +114,7 @@ import openpyxl
 import polars as pl
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
 D = ROOT / "warehouse" / "derived"
@@ -310,7 +311,7 @@ def main() -> int:
     # `warehouse/derived/wc_master.parquet` IS wcmaster (scripts/ingest_wcmaster
     # .py) and is what `export_cmbc_xlsx.py` already resolves presses with, so
     # both packs carry one identity rather than two that can drift apart.
-    _wcm_f = ROOT.parent.parent / "wcmaster 1.xlsx"
+    _wcm_f = paths.raw("wcmaster 1.xlsx")
     press_no: dict[str, str] = {}
     _wcm_rows: list[dict] = []
     _wcp = D / "wc_master.parquet"
@@ -344,7 +345,7 @@ def main() -> int:
     for r in shr.iter_rows(named=True):                         # 2. curing recipe chain
         if r.get("sku_desc"):
             desc_of.setdefault(str(r["sku_code"]), str(r["sku_desc"]).strip())
-    _b6 = ROOT.parent.parent / "Book6(Sheet5).csv"              # 3. demand file
+    _b6 = paths.raw("Book6(Sheet5).csv")              # 3. demand file
     if _b6.exists():
         import csv as _csv
         with open(_b6, newline="", encoding="cp1252") as _fh:
@@ -491,6 +492,11 @@ def main() -> int:
             st, en = _win(r["day"], r["shift"])
             b_shift.append([
                 r["machine"], _day_date(r["day"]), r["shift"], r["SKUCode"],
+                # GT_Code: the engine PLANS this, and the SKU on the row is a
+                # share-assigned label on top of it. Carrying both makes every
+                # row traceable back to the planning key instead of only to the
+                # reporting one -- the reference pack has no such column.
+                r["gt_code"],
                 _desc(r["SKUCode"]),
                 int(r["qty"]), round(float(r["CO_Mins"]), 1),
                 r["start_ts"].strftime("%Y-%m-%d %H:%M"),
@@ -548,15 +554,18 @@ def main() -> int:
             pu = built.get(k, 0.0)
             tot = pu + gi
             gapq = max(dq - tot, 0.0)
-            bdf.append([k, cat.get(k), round(prio.get(k, 0.0), 7), int(dq),
+            bdf.append([k, gt, cat.get(k), round(prio.get(k, 0.0), 7), int(dq),
                         int(round(gi)), int(round(pu)), int(round(tot)),
                         int(round(gapq)), _pct(min(tot / dq, 1.0) if dq else 0),
                         "FULLY MET" if gapq <= 0 else "PARTIAL",
                         round(ct_sku.get((plant, k),
                                          ct_gt.get((plant, gt), 0.0)), 1),
                         elig_m.get(gt, 0), round(elig_p.get(gt, 0) / 1.0, 2), None])
-        bdf += [[None] * 14,
-                ["Total Building COs", len(co_rows)] + [None] * 12]
+        # Footer widths track the header. Adding GT_Code at index 1 without
+        # padding these left the count sitting under GT_Code instead of under
+        # Category -- a summary row silently reading against the wrong header.
+        bdf += [[None] * 15,
+                ["Total Building COs", None, len(co_rows)] + [None] * 12]
 
         # machine utilisation, building
         avail = ndays * 1440.0
@@ -580,8 +589,9 @@ def main() -> int:
 
         _write(out / f"optimizer_building_schedule_full_{stamp}_{plant}.xlsx", [
             ("Shift Schedule", f"BC Building Schedule (Rolling Pipeline) - {plant}",
-             ["Machine", "Date", "Shift", "SKUCode", "Description", "Qty",
-              "CO_Mins", "StartTime", "EndTime", "Machine_Group", "CO_Type"],
+             ["Machine", "Date", "Shift", "SKUCode", "GT_Code", "Description",
+              "Qty", "CO_Mins", "StartTime", "EndTime", "Machine_Group",
+              "CO_Type"],
              b_shift),
             ("Changeover Plan", None,
              ["Machine", "Date", "Day", "From_SKU", "Target_SKU", "CO_Type",
@@ -592,10 +602,10 @@ def main() -> int:
              ["Date", "GT_Produced", "Carcass_Produced", "Total_Units",
               "Active_SKUs", "Cumulative_GT", "EndDay_GT_Inventory"], daily),
             ("Demand Fulfillment (B2C)", None,
-             ["SKUCode", "Category", "Priority", "Demand", "GT_Inventory",
-              "Planned_Units", "Planned+GT", "Gap", "Fulfillment_Pct", "Status",
-              "CycleTime_min", "Eligible_Machines", "Presses_Needed",
-              "Skip_Reason"], bdf),
+             ["SKUCode", "GT_Code", "Category", "Priority", "Demand",
+              "GT_Inventory", "Planned_Units", "Planned+GT", "Gap",
+              "Fulfillment_Pct", "Status", "CycleTime_min", "Eligible_Machines",
+              "Presses_Needed", "Skip_Reason"], bdf),
             ("Machine Utilization", mu_title,
              ["Machine", "Machine_Group", "Available_Mins", "GT_Built",
               "Carcass_Built", "Prod_Mins", "CO_Mins", "Idle_Mins", "Util_Pct",
@@ -664,6 +674,7 @@ def main() -> int:
             zero_rows += (q == 0)
             c_shift.append([
                 _day_date(r["day"]), r["shift"], _mach(r["press"]), r["SKUCode"],
+                r["gt_code"],                       # the planning key, see b_shift
                 _desc(r["SKUCode"]), st, en,
                 q, round(com, 1), round(clm, 1),
                 round(ct_sku.get((plant, r["SKUCode"]),
@@ -680,7 +691,7 @@ def main() -> int:
             pu = cured.get(k, 0.0)
             gq = max(dq - pu, 0.0)
             ct = ct_sku.get((plant, k))
-            cdf.append([k, round(prio.get(k, 0.0), 4), int(dq), int(round(gi)),
+            cdf.append([k, gt, round(prio.get(k, 0.0), 4), int(dq), int(round(gi)),
                         int(round(pu)), int(round(gq)),
                         (pu / dq if dq else 0.0),
                         "FULLY MET" if gq <= 0 else "PARTIAL",
@@ -689,8 +700,10 @@ def main() -> int:
                         elig_p.get(gt, 0),
                         round(elig_p.get(gt, 0) / 1.0, 2),
                         None if ct else "missing curing CT"])
-        cdf += [[None] * 13,
-                ["TOTAL", None, int(sum(dsku.values())), None,
+        # +1 blank at index 1 for GT_Code, so Demand/Planned/Gap/Pct stay under
+        # their own headers instead of shifting one column left.
+        cdf += [[None] * 14,
+                ["TOTAL", None, None, int(sum(dsku.values())), None,
                  int(round(sum(cured.values()))),
                  int(round(max(sum(dsku.values()) - sum(cured.values()), 0))),
                  (sum(cured.values()) / max(sum(dsku.values()), 1)),
@@ -823,9 +836,10 @@ def main() -> int:
 
         _write(out / f"optimizer_curing_schedule_full_{stamp}_{plant}.xlsx", [
             ("Demand Fulfillment", None,
-             ["SKUCode", "Priority", "Demand", "GT_Inventory", "Planned_Units",
-              "Gap", "Fulfillment_Pct", "Status", "CycleTime_min", "CT_available",
-              "Eligible_Machines", "Presses_Needed", "Skip_Reason"], cdf),
+             ["SKUCode", "GT_Code", "Priority", "Demand", "GT_Inventory",
+              "Planned_Units", "Gap", "Fulfillment_Pct", "Status",
+              "CycleTime_min", "CT_available", "Eligible_Machines",
+              "Presses_Needed", "Skip_Reason"], cdf),
             ("Machine Utilization", pu_title,
              ["Machine", "Available_Mins", "Used_Mins", "CO_Mins",
               "Mould_Clean_Mins", "Idle_Mins", "Utilization_Pct", "CO_Pct",
@@ -833,9 +847,9 @@ def main() -> int:
               "SKUs_Count", "total_cycle", "Total_Units",
               "Remaining_Mould_Life"], pu_rows),
             ("Shift Schedule", None,
-             ["Date", "Shift", "Machine", "SKUCode", "Description", "StartTime",
-              "EndTime", "Qty", "CO_Mins", "Mould_Clean_Mins", "CycleTime_min",
-              "GT_Inventory", "Remarks"], c_shift),
+             ["Date", "Shift", "Machine", "SKUCode", "GT_Code", "Description",
+              "StartTime", "EndTime", "Qty", "CO_Mins", "Mould_Clean_Mins",
+              "CycleTime_min", "GT_Inventory", "Remarks"], c_shift),
             ("Changeover Plan", None,
              ["Date", "Day", "Shift", "Press", "From_SKU", "Target_SKU",
               "CO_Type", "Mins"], cco),

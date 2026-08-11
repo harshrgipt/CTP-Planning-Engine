@@ -79,13 +79,14 @@ import openpyxl
 import polars as pl
 
 ROOT = Path(__file__).resolve().parent.parent
-CT = ROOT.parent.parent / "cycletime"
+CT = paths.CYCLETIME
 D = ROOT / "warehouse" / "derived"
 
 # ONE definition of the machine-make map, the cavity count and the load/unload
 # adder -- `planner/cmbc/plant_ct.py`. Duplicating a constant across two files is
 # the defect that produced PARTITION §1g twice; do not re-declare them here.
 from planner.cmbc.plant_ct import CAVITIES, LOAD_UNLOAD_MIN, MAKE_OF  # noqa: E402
+from planner import paths
 
 
 def _rows(path: Path, sheet: str) -> list[tuple]:

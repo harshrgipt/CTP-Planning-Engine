@@ -15,9 +15,10 @@ import sys
 from pathlib import Path
 
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-INP = ROOT.parent.parent / "INPUT" / "derived"
+INP = paths.INPUT_DERIVED
 DER = ROOT / "warehouse" / "derived"
 
 pl.Config.set_tbl_rows(80)

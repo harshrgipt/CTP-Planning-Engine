@@ -31,9 +31,10 @@ import numpy as np
 import polars as pl
 
 from planner.data.warehouse import duck
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT.parent.parent / "INPUT" / "derived" / "gt_home_machine.parquet"
+OUT = paths.INPUT_DERIVED / "gt_home_machine.parquet"
 
 Q = """
 SELECT plant, itemCode AS gt_code, machineCode AS machine, count(*) AS n

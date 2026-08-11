@@ -52,8 +52,9 @@ from pathlib import Path
 import polars as pl
 
 from planner.cmbc import plant_ct
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
 PLANTS = ["PCR", "TBR"]

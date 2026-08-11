@@ -24,12 +24,13 @@ import polars as pl
 
 warnings.filterwarnings("ignore")
 from openpyxl import load_workbook                            # noqa: E402
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT.parent.parent
-BOOK = SRC / "INPUT" / "raw" / "CTP Set up building ,curing and inspection (1) 2.xlsx"
+SRC = paths.RAW
+BOOK = paths.raw("CTP Set up building ,curing and inspection (1) 2.xlsx")
 OUT = ROOT / "warehouse" / "derived"
-INP = SRC / "INPUT" / "derived"
+INP = paths.INPUT_DERIVED
 
 
 def num(x):

@@ -27,10 +27,11 @@ from pathlib import Path
 
 import polars as pl
 from openpyxl import load_workbook
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT.parent.parent          # C:/Users/91810/Downloads/send
-TBR_MATRIX = SRC / "TBR BUILDING ALLOWABLE MATRIX.xlsx"
+TBR_MATRIX = paths.raw("TBR BUILDING ALLOWABLE MATRIX.xlsx")
 COMPONENTS = ["PRE ASSEMBLY", "NYLON-1", "NYLON2&3", "GUM STRIP",
               "STEEL CHIPPER LEFT", "STEEL CHIPPER RIGHT", "BODYPLY",
               "SHOULDER PAD", "APEXED BEAD", "BELT-1", "BELT-2",

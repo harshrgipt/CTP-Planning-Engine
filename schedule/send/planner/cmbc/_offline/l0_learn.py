@@ -40,8 +40,9 @@ import numpy as np
 import polars as pl
 
 from planner.data.warehouse import duck, set_cutoff
+from planner import paths
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = paths.ROOT   # depth-independent; this file moved one level deeper
 OUT = ROOT / "warehouse" / "params"
 PLANTS = ["PCR", "TBR"]
 IDLE_CUT_S = 1800.0        # a build gap beyond 30 min is idle, not a slow tyre
@@ -357,7 +358,7 @@ def _rim_lookup() -> dict[str, str]:
     size ("145 R 12"). Without this the PCR sister-lift row silently vanished."""
     import re as _re
     out: dict[str, str] = {}
-    fp = ROOT.parent.parent / "ALL PCR CTP SKUS.xlsx"
+    fp = paths.raw("ALL PCR CTP SKUS.xlsx")
     if not fp.exists():
         return out
     import warnings

@@ -42,9 +42,10 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-IN = ROOT.parent.parent / "INPUT" / "derived"
+IN = paths.INPUT_DERIVED
 
 _sz = pl.read_parquet(IN / "gt_size.parquet")
 RIM = {r["gt_code"]: str(r["rim"]) for r in _sz.iter_rows(named=True)

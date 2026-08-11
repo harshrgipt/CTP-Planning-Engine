@@ -41,6 +41,7 @@ import polars as pl
 
 from planner.cmbc import plant_ct
 from planner.config import CONFIG, GT_SHELF_LIFE_H
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -60,7 +61,7 @@ def _opening_gt_path(root, month):
     p = Path(ov)
     return p if p.is_absolute() else d / ov
 
-SRC_INP = ROOT.parent.parent / "INPUT" / "derived"
+SRC_INP = paths.INPUT_DERIVED
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
 

@@ -15,9 +15,10 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
-INP = ROOT.parent.parent / "INPUT" / "derived"
+INP = paths.INPUT_DERIVED
 FLOOR = {"PCR": 150.0, "TBR": 70.0}
 TAU = {"PCR": 4.32, "TBR": 4.81}
 T = 16.0

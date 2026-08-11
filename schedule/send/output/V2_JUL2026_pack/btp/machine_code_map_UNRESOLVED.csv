@@ -1,0 +1,30 @@
+btp_code,btp_role,found_in_wcmaster,wcmaster_wcID,wcmaster_processID,wcmaster_description,verdict
+6001,building,true,82,9,PCR INSPECTION STATION  1,CONTRADICTS - different equipment class
+6002,building,true,83,9,PCR INSPECTION STATION  2,CONTRADICTS - different equipment class
+6003,building,true,84,9,PCR INSPECTION STATION  3,CONTRADICTS - different equipment class
+6004,building,true,85,9,PCR INSPECTION STATION  4,CONTRADICTS - different equipment class
+6802,building,false,"","","",ABSENT from this plant's work-centre master
+7001,building,true,90,6,INSPECTION STATION 1,CONTRADICTS - different equipment class
+7002,building,true,91,6,INSPECTION STATION 2,CONTRADICTS - different equipment class
+7003,building,true,92,6,INSPECTION STATION 3,CONTRADICTS - different equipment class
+7004,building,true,93,6,INSPECTION STATION 4,CONTRADICTS - different equipment class
+7201,building,true,101,17,X ray,CONTRADICTS - different equipment class
+7301,building,true,103,16,TBR RunOut Machine,CONTRADICTS - different equipment class
+7501,building,false,"","","",ABSENT from this plant's work-centre master
+7502,building,false,"","","",ABSENT from this plant's work-centre master
+7503,building,false,"","","",ABSENT from this plant's work-centre master
+8301,building,false,"","","",ABSENT from this plant's work-centre master
+8302,building,false,"","","",ABSENT from this plant's work-centre master
+8501,building,false,"","","",ABSENT from this plant's work-centre master
+8502,building,false,"","","",ABSENT from this plant's work-centre master
+14801,curing,false,"","","",ABSENT from this plant's work-centre master
+14802,curing,false,"","","",ABSENT from this plant's work-centre master
+14803,curing,false,"","","",ABSENT from this plant's work-centre master
+9503,curing,false,"","","",ABSENT from this plant's work-centre master
+9701,curing,false,"","","",ABSENT from this plant's work-centre master
+9704,curing,false,"","","",ABSENT from this plant's work-centre master
+9802,curing,false,"","","",ABSENT from this plant's work-centre master
+9804,curing,false,"","","",ABSENT from this plant's work-centre master
+24824,curing,false,"","","",ABSENT from this plant's work-centre master
+4406,curing,false,"","","",ABSENT from this plant's work-centre master
+4923,curing,false,"","","",ABSENT from this plant's work-centre master

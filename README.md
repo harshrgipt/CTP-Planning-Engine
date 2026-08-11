@@ -56,25 +56,29 @@ nameplate**, is press capacity seated and is never a tyre count.
 ## 2. Repository layout — and why it is nested
 
 ```
-ctp-planner/                       <- WRAPPER ROOT. Plant workbooks live here.
-├── README.md   VERSION   .gitignore
-├── INPUT/
-│   ├── derived/                   mined master parquets the scheduler reads
-│   ├── demand/  opening_gt/  raw/ archived inputs by month
+ctp-planner/                       <- WRAPPER ROOT. Docs only.
+├── README.md   VERSION   CLAUDE.md   .gitignore
+├── INPUT/                         <- EVERY input file. One folder.
+│   ├── raw/                       18 plant workbooks / csv / pdf, verbatim
+│   ├── derived/                   29 frozen mined masters the scheduler reads
+│   ├── cycletime/                 plant cycle-time workbooks (build + cure)
+│   ├── opening_gt_manual/         manual GT floor counts, 2026-08-01
+│   ├── btpformat/                 the plant's own BTP workbooks (format reference)
+│   ├── demand/  opening_gt/       archived inputs by month
 │   └── MANIFEST.csv               provenance of every derived file
-├── cycletime/                     plant cycle-time workbooks (build + cure)
-├── gtinvaug/                      manual GT floor counts, 2026-08-01
-├── btpformat/                     the plant's own BTP workbooks (format reference)
-├── August_Demand_PCR_TBR_Classification.xlsx
-├── Recipemaster 1.xlsx   wcmaster 1.xlsx   ALL PCR CTP SKUS.xlsx   ...
 └── schedule/send/                 <- ENGINE ROOT. Every command runs from here.
     ├── planner/
-    │   ├── cmbc/                  ** THE LIVE ENGINE, layers L0–L12 **
+    │   ├── cmbc/                  ** THE LIVE ENGINE **
+    │   │   ├── l1_preflight · l4 · l45 · l5 · l7 · l10 · l11   the pipeline
+    │   │   ├── l25_cie · plant_ct · l5_ng                     modules, not steps
+    │   │   ├── _offline/          L0 L2 L3 — rebuild-only, need raw MES
+    │   │   └── _retired/          L1 L6 L8 L9 L12 _diag — nothing reads their output
+    │   ├── paths.py               ** single resolver for every input file **
     │   ├── config.py              single source of truth for every enforced cap
     │   ├── data/                  DuckDB warehouse singleton + ingest
     │   ├── plan/ learn/ kb/ …     RETIRED generation-1 engine (see §9)
     │   └── validate/              independent verifier
-    ├── scripts/                   drivers, ingest, exporters, diagnostics
+    ├── scripts/                   ingest, exporters, diagnostics
     ├── masters/                   demand, opening GT, press rosters, changeover
     ├── warehouse/                 derived/ params/ masters/ bom/ … (small, committed)
     ├── output/                    AUG2026_pack, JUL2026_pack
@@ -82,11 +86,16 @@ ctp-planner/                       <- WRAPPER ROOT. Plant workbooks live here.
     └── MEMORY.md  PARTITION_AND_CHANGEOVER.md  BUSINESS_RULES.md  EXPERT_AUDIT.md
 ```
 
-**Why the two levels.** The engine resolves the plant workbooks and
-`INPUT/derived/` as `ROOT.parent.parent`, i.e. two directories above `planner/`.
-About thirty read sites depend on it. Flattening the tree breaks all of them, so
-the nesting is preserved exactly as the code expects. `schedule/send/` is the
-project root for every command; the wrapper above it is the data root.
+**Why the two levels.** `schedule/send/` is the project root for every command;
+the wrapper above it is the data root. All input lookups go through
+`planner/paths.py` — never hand-write `ROOT.parent.parent / ...` again.
+`PLANNER_DATA_ROOT` relocates the whole `INPUT/` tree for deployments that mount
+data elsewhere.
+
+⚠️ `INPUT/derived/` and `warehouse/derived/` share 21 filenames. Twenty are
+byte-identical; **`press_mould_change.parquet` is not**, and L5/L10 read the
+warehouse copy. `paths.input_derived()` and `paths.wh_derived()` are separate
+functions with no cross-fallback for exactly this reason.
 
 ---
 
@@ -99,60 +108,66 @@ unavailable on Windows. Invoke the modules directly.
 cd schedule\send
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pytest tests\ -q          # 11 tests, ~2 s
+.\.venv\Scripts\python.exe -m pytest tests\ -q          # 15 tests, ~2 s
 ```
 
 Under Git Bash the interpreter is `./.venv/Scripts/python.exe`; on Linux/macOS it
 is `./.venv/bin/python` and the `make` targets work.
 
-### Plan a month — the actual sequence
+### Plan a month — one command
 
-There is **no orchestrator** that chains L0→L12. `scripts/run_arm.py` builds
-L5→L11; the layers before it are month-level and are run once.
+`main.py` chains the whole pipeline: inputs → checks → schedule →
+BTP pack. About 30 seconds for August 2026.
 
 ```bash
 cd schedule/send
-export PYTHONPATH=.
-PY=./.venv/Scripts/python.exe
+./.venv/Scripts/python.exe main.py plan --month 2026-08 \
+      --run aug_ship --out output/AUG2026_pack \
+      --opening-gt opening_gt_manual_2026-08.parquet
+```
 
-# ---- 0. inputs for the month ------------------------------------------------
-$PY -m scripts.ingest_orderbook_demand \
-      --xlsx "../../August_Demand_PCR_TBR_Classification.xlsx" \
-      --sheet "August Demand Classified" --month 2026-08
-$PY -m scripts.ingest_manual_opening_gt --month 2026-08 --age-h 24 \
-      --pcr "../../gtinvaug/gt_inventory_manual_pcr_20260801.xlsx" \
-      --tbr "../../gtinvaug/gt_inventory_manual_tbr_20260801.xlsx"
-export PLANNER_OPENING_GT=opening_gt_manual_2026-08.parquet
+```
+00_preflight   every input present + allowable machine / inch / TT-TL / press /
+               mould / cycle-time / partition-stamp checks.  Exit 1 on ERROR.
+01_l4          net cure requirement
+02_l45         lot sizing (the CURE lot)
+03_partition   rebuilt only if not already stamped for this month
+04_l5          cure campaign master -- the plan is born here
+05_l7          pull release of building
+06_l10         shift-grid discretisation
+07_l11         40 plan invariants
+08_share       GT -> SKU share from the order book
+09_btp         the plant's own workbook format
+```
 
-# ---- 1. month-level layers --------------------------------------------------
-$PY -m planner.cmbc.l1_validate        --month 2026-08
-$PY -m planner.cmbc.l2_capability      --month 2026-08     # needs raw MES
-$PY -m planner.cmbc.l25_cie            --month 2026-08
-$PY -m planner.cmbc.l3_ceiling         --month 2026-08
-$PY -m planner.cmbc.l4_net_requirement --month 2026-08
-$PY -m planner.cmbc.l45_lotsize        --month 2026-08
+Trailing `KEY=VALUE` pairs become `PLANNER_*` overrides, so an A/B arm is
+`--run mr0 PLANNER_L7_MAKEROOM=0`. Each step's stdout lands in
+`runs/<name>/log_<step>.txt` — the partition staleness line and the rim-spill
+report are printed, not persisted, so that log is the only evidence of which
+partition the run used.
 
-# ---- 2. REBUILD THE PARTITION. MANDATORY, PER MONTH. ------------------------
-$PY scripts/build_gt_machine_partition.py 2026-08
+**Set `--opening-gt` on the driver, not per step.** Both the planner and the
+exporters read `PLANNER_OPENING_GT`. Exporting with a different value than the
+arm was built with changes *only* the `GT_Inventory` column of the BTP
+fulfilment sheets while every other figure stays identical — a diff that reads
+like a scheduling change and is not.
 
-# ---- 3. the schedule --------------------------------------------------------
-$PY scripts/run_arm.py aug_ship --month 2026-08 \
-      PLANNER_OPENING_GT=opening_gt_manual_2026-08.parquet
+The 13-sheet verification pack and the independent verifier are separate; the
+BTP pack does not produce the CSVs `verify_export.py` reads:
 
-# ---- 4. exports + independent verification ----------------------------------
+```bash
 $PY scripts/export_shift_schedule.py aug_ship 2026-08 output/AUG2026_pack
-$PY -m scripts.build_gt_sku_share --month 2026-08 --from-demand
-$PY -m scripts.export_btp_format --run aug_ship --month 2026-08 \
-      --out output/AUG2026_pack/btp
 $PY scripts/verify_export.py output/AUG2026_pack 2026-08
 ```
 
-**The partition rebuild is not optional.** The GT→machine partition is sized
-against one month's demand and that month's calendar hours. L7 **refuses to plan**
-if the file on disk carries a different month stamp — a stale partition once cost
-July 0.58 pt of fulfilment and 10.3 pt of same-size while every gate passed.
+**A stale partition is never used silently.** The GT→machine partition is sized
+against one month's demand and calendar hours; L7 **refuses to plan** on one
+stamped for a different month — a stale partition once cost July 0.58 pt of
+fulfilment and 10.3 pt of same-size while every gate passed. Preflight reads that
+stamp up front and blocks, so `main.py` can safely reuse a partition that is
+already correct for the month.
 
-`run_arm.py` deletes and rebuilds the run directory from L5. Never seed an arm
+`main.py` deletes and rebuilds the run directory from L5. Never seed an arm
 with `cp -r`: 15 run directories once carried another arm's scorecard, and a flag
 worth 8,085 tyres read as free.
 
@@ -161,11 +176,14 @@ worth 8,085 tyres read as free.
 The raw MES CSVs (~4.4 GB) are **not** in this repository. Everything mined from
 them is committed, so:
 
-- **L3 → L12 run out of the box** — verified: a clean copy of this package
-  reproduces the August plan to the tyre (477,350 of 523,335 = 91.2 %).
-- **L0 (learning), L1's mould checks, L2 (capability) and `make ingest` need the
-  raw MES.** Point the plant's CSV drops at `curing/`, `o_production/`,
-  `io_production_consumption/` and run `python -m planner.cli ingest`.
+- **A prepared month replans end-to-end out of the box.** Verified 2026-08-11: a
+  fresh `.venv` on a clean checkout reproduces the shipped August BTP pack on all
+  34 sheets, and every plan artefact bit-identically.
+- **L0 (learning), L1's mould checks, L2 (capability), `make ingest` — and the
+  partition rebuild — need the raw MES.** `build_gt_machine_partition.py` mines
+  `v_build`, so planning a month whose partition was never built requires the CSV
+  drops at `curing/`, `o_production/`, `io_production_consumption/` followed by
+  `python -m planner.cli ingest`.
 
 ---
 
@@ -188,7 +206,7 @@ when*. Curing proposes; building disposes.
 | **L6** | building feasibility gate | L5 campaigns, L2 eligibility, B16 TT/TL split | `build_gate.parquet` — which campaigns building can actually feed |
 | **L7** | **pull release of building** | L5/L6, partition, opening GT, cycle times | `build_schedule.parquet`, `gt_events.parquet`, `cure_campaigns_reconciled.parquet`, `carry_forward_gt.parquet` |
 | **L8** | prep / mixing back-explosion | build schedule, BOM, ageing spec | component and compound requirements with their ageing windows |
-| **L9** | coupled optimisation (SA/Tabu/LNS over cure campaigns) | L5 output | *skipped in the shipped arm* — it overwrites L5's own output |
+| ~~L9~~ | ~~coupled optimisation~~ | — | **REMOVED 2026-08-11 after measurement.** Wired as L5→L9→L7→L10→L11 and run on 2026-08 with a 300 s budget: searched 1,428 candidates, **accepted 0 moves**, all nine cost tiers unchanged, campaigns byte-identical to L5's, 0 of 40 invariants moved. The search is lexicographic and tier 1 (`demand short` = 7,409) rejects everything below it. Now in `planner/cmbc/_retired/`. |
 | **L10** | time discretisation & sequencing | L7 output | shift-grid build and cure rows, mould changes |
 | **L11** | plan validation — 40 invariants | everything above | `l11_invariants.parquet` + `l11_provenance.json` (freshness fingerprint) |
 | **L12** | explainability, KPIs, gap-to-ceiling | the run directory | per-decision rationale |

@@ -20,10 +20,11 @@ import polars as pl
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from planner.cmbc.l11_validate_plan import arm_is_stale  # noqa: E402
+from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
-SZ = pl.read_parquet(ROOT.parent.parent / "INPUT" / "derived" / "gt_size.parquet")
+SZ = pl.read_parquet(paths.INPUT_DERIVED / "gt_size.parquet")
 FLOOR = {"PCR": 150.0, "TBR": 70.0}
 RAIL = {"PCR": 4800, "TBR": 1400}
 BAND_LO = {"PCR": 4500, "TBR": 1200}
