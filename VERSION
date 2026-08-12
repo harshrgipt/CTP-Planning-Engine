@@ -1,32 +1,78 @@
-CTP-PLANNER  2026.08.10
+CTP-PLANNER  v8  ·  2026-08-12
 
 There is no git history behind this snapshot, so the version marker is a DATE
-STAMP. Everything in this package is the state of the engine at the end of
-2026-08-10, including that day's changes:
+STAMP plus an arm generation (v8 = the eighth measured configuration).
 
-  2026-08-10  extend horizon              PLANNER_HORIZON_MODE=extend, 72 h tail
-              plant cycle times           PLANNER_PLANT_CT=1, per-machine build /
-                                          per-GT cure times from the plant's own
-                                          cycle-time workbooks instead of mined ones
-              strict lot floor            PLANNER_STRICT_LOT_FLOOR=1, B12 enforced
-                                          in `_place`, not only on the split path
-              B16 gated on BOTH sides     every GT has a machine AND every machine
-                                          has eligible in-group demand
-              setup reservation           changeover time is reserved on the machine,
-                                          verified 0 unreserved transitions
-              partition staleness gate    L7 REFUSES a partition built for another
-                                          month instead of silently falling back
-              BTP exporter                scripts/export_btp_format.py
-              order-book demand ingest    scripts/ingest_orderbook_demand.py
-              manual GT stock ingest      scripts/ingest_manual_opening_gt.py
-              GT namespace bridge         scripts/gt_namespace.py
-              SLIVER_TBR default 1.0 -> 0 the measured-best value is now the default,
-                                          so "run with the defaults" reproduces the
-                                          shipped packs
+SHIPPED PACKS
+  output/V8_JUL2026_pack/    July 2026    PCR 92.2 % / TBR 95.7 % in-month
+  output/V8_AUG2026_pack/    August 2026  PCR 86.8 % / TBR 94.6 % in-month
 
-REFERENCE RUNS IN THIS PACKAGE
-  schedule/send/runs/hz_ext72   July 2026    PCR 96.6 % / TBR 94.5 % in-month
-  schedule/send/runs/aug_ship   August 2026  PCR 90.6 % / TBR 93.7 % in-month
+  Both: 0 allowable violations · 0.0 % sub-floor runs · R5 max <= 72 h ·
+  100 % rim coverage · 15/15 tests pass.
 
-Both were produced by `scripts/run_arm.py`, which builds L5 -> L11 fresh and
-refuses to report a directory whose scorecard describes a different plan.
+WHAT CHANGED SINCE 2026-08-10 (v1)
+  allowable machine list   NOW HARD. It was a frozen input nothing read; 19.9 %
+                           of July PCR volume (76,254 tyres) was building on
+                           machines the plant does not sanction. 0 violations now.
+                           Cost: PCR -3.6 pt Jul / -5.3 pt Aug. TBR unaffected.
+  press platen window      REMOVED. press_platen_master.rim_lo/rim_hi contradicts
+                           the plant's own press_class_pcr and rejects pairs
+                           allowed_press_matrix permits as `direct`. Unusable.
+  allowable press list     verified already clean -- 0 violations, both months.
+  machine rim lock         MEASURED AND LEFT OFF. It is mined habit, not plant
+                           rule (purity 66-89 %), and caused 87 % of August PCR's
+                           infeasible hours. Physical inch capability stays hard.
+  gt_size rim coverage     72.4 % -> 100 %. 35 PCR GTs filled from aging_limits.
+                           Aug PCR weighted changeover 129.2 -> 112.8 (-12.7 %).
+  L11 same-size metric     fixed. Counted unknown-vs-unknown rims as SAME
+                           (None == None) and known-vs-unknown as different.
+                           True PCR same-size was 81.3 %, reported as 60.9 %.
+  single entry point       main.py -- status/check/plan/export/verify/masters/
+                           rebuild/test. 13 layers -> 8.
+  input consolidation      every input file under INPUT/, resolved through
+                           planner/paths.py. PLANNER_DATA_ROOT relocates it.
+  new: preflight (L1)      MES-free input gate; the old L1 crashed on any clone.
+  new: L4b capacity flow   max-flow feasibility BEFORE L5, names the binding
+                           machine subset. Proved Aug PCR is 63 h short on
+                           allowable capacity -- an arithmetic ceiling, not a
+                           scheduling failure.
+  new: L4b allocation      family-minimising GT->machine target, wired into L7 as
+                           a preference. Aug PCR +0.8 pt, unfed -3,349, families
+                           per machine 1.90 -> 1.60.
+  new: demand intake       Book6 SKU list -> PCR/TBR split internally, 97.6 %
+                           resolved via the curing-recipe chain.
+  new: running moulds      per-press seated mould, single-day snapshot
+                           (month length - 3). NOT yet consumed by L5 -- the
+                           mouldNo <-> engine mould_set bridge does not exist.
+  retired                  L1(old), L6, L8, L9, L12 and 5 diagnostics. L9 was
+                           measured first: 1,428 candidates, 0 moves accepted.
+
+MEASURED AND REJECTED -- do not retry without new evidence
+  de-pin L7 (HARD_PIN=0)        -0.5 pt, unfed +2,108
+  more insertion points         inert, 0 effect
+  L5<->L6 loop, delay mode      -16,548 tyres (pushes output past the boundary)
+  L5<->L6 loop, split mode      -18,129 tyres (each piece pays a 6 h mould change:
+                                476 -> 767 campaigns, +1,029 press-h of setup)
+  rim-priority flags            ~0.8 pt fulfilment per 1 pt same-size, both months
+  RIM_MAX_CONCURRENT / SISTER_BUCKET_H / RIM_MIN_CAMPAIGN_H   inert on their own
+  queue-level rim grouping      already in the code as a failed experiment
+                                (0 same-rim changes, -25,549 tyres)
+
+  Score: 5 of 6 scheduler-side changes measured NEGATIVE. Both that paid were
+  DATA fixes (rim fill, L4b allocation). The remaining wins are in inputs and
+  plant rulings, not in the search.
+
+OPEN -- needs the plant, not engineering
+  horizon ruling        +1.8 pt Jul PCR / +5.8 pt Aug PCR (carry-out tail)
+  carry-in ruling       +2.9 pt Jul PCR (cold start at day 0-2)
+  opening stock spread  only 52 % (Jul) / 37 % (Aug) of demanded GTs hold any
+                        opening stock; day 1 runs at 70 % press utilisation
+  July partition        missing, needs the raw MES drop
+  unmapped demand       60 rows; 5 Book6 SKUs (9,854 tyres) have no GT
+  TBR cure cycle times  50 rows missing, mined fallback in use
+  running-mould files   2-3 days only, timestamps read 2024 not 2026
+
+ARITHMETIC CEILINGS -- no scheduler recovers these
+  Aug PCR needs 13,764 tyres/day; presses peak at 13,319/day  -> -3.2 pt
+  Aug PCR allowable capacity is 63 h short of requirement     -> -0.9 pt
+  Jul is NOT rate-limited: peak 13,288/day vs 12,816 required -> reachable
