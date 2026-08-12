@@ -63,7 +63,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from planner.cmbc import plant_ct
+from planner.cmbc import allowable, plant_ct
 from planner.config import CONFIG, GT_SHELF_LIFE_H
 from planner import paths
 
@@ -727,7 +727,18 @@ def main() -> None:
     tau_rel = tau if _tr == "star" else tau_min
     cad = pl.read_parquet(PARAMS / P["tables"]["build_cadence"])
     camp = pl.read_parquet(run / "cure_campaigns.parquet")
-    cm = pl.read_parquet(D / f"cap_machine_{a.month}.parquet")
+    # THE PLANT'S ALLOWABLE MACHINE LIST IS A HARD CONSTRAINT.
+    # `cap_machine` widens eligibility with an INCH basis at penalty 5000, and a
+    # penalty is a price the greedy release will pay -- 19.9 % of July PCR volume
+    # (76,254 tyres over 21 GTs) landed on machines the plant does not sanction.
+    # This is the single chokepoint: `elig`/`pen` below, the scarcity ordering,
+    # the horizon assignment and _place all derive from `cm`.
+    # Two hard filters, in this order. The rim lock was ORDERING-only before --
+    # `lock_of` merely supplied rim-matched candidates first -- so hard-tier
+    # machines still carried 13.7 % foreign-rim volume on July PCR.
+    cm = allowable.restrict(pl.read_parquet(D / f"cap_machine_{a.month}.parquet"),
+                            label=f"cap_machine_{a.month}")
+    cm = allowable.restrict_rimlock(cm, label=f"cap_machine_{a.month}")
     grp = pl.read_parquet(D / f"cap_ttl_groups_{a.month}.parquet")
     tt = pl.read_parquet(paths.INPUT_DERIVED / "tt_tl.parquet")
     # Rim per GT, for size-aware machine selection (R6/R7). The plant's
@@ -1110,7 +1121,8 @@ def main() -> None:
             # that, so it opens the file itself rather than reaching forward.
             _partf2 = (paths.INPUT_DERIVED / "gt_machine_partition.parquet")
             if USE_PARTITION and _partf2.exists():
-                _pf2 = pl.read_parquet(_partf2)
+                _pf2 = allowable.restrict(pl.read_parquet(_partf2),
+                                          label="partition/free_h", quiet=True)
                 for _r2 in (_pf2.group_by(["plant", "machine"])
                             .agg(pl.col("hours").sum()).iter_rows(named=True)):
                     _free_h[(_r2["plant"], _r2["machine"])] = \
@@ -1220,7 +1232,11 @@ def main() -> None:
     part_done: dict[tuple, float] = {}   # ... -> hours actually placed so far
     _partf = paths.INPUT_DERIVED / "gt_machine_partition.parquet"
     if USE_PARTITION and _partf.exists():
-        _pf = pl.read_parquet(_partf)
+        # The partition is mined from the 8-month machine x size matrix, not from
+        # the allowable list, so it can pin a machine the plant forbids -- it
+        # pinned TBMPCR7 tier-1 for GT 1503 NEO MSIL, which the matrix excludes.
+        # Restrict it here too, or the pin re-introduces what `cm` just removed.
+        _pf = allowable.restrict(pl.read_parquet(_partf), label="partition")
         # STALENESS GUARD. The partition is sized against ONE month's demand and
         # that month's calendar hours. Silently reusing July's partition for
         # August would pin every GT to a machine chosen for the wrong demand --
@@ -1291,6 +1307,34 @@ def main() -> None:
         return out + [m for m in _spill(p, gt) if m not in out]
 
     load_h: dict[str, float] = {}
+    # ---- B: L4b FAMILY-MINIMISING ALLOCATION AS A PREFERENCE --------------
+    # `l4b_alloc_<month>.parquet` assigns each GT's hours to machines with a
+    # second objective the max-flow does not have: minimise the number of RIM
+    # FAMILIES a machine must carry. Measured headroom, July PCR: 2.40 families
+    # per machine as L7 currently produces, against 1.40 in the allocation.
+    # Every family removed from a machine is a different-size changeover
+    # eliminated, and the rim-fill result showed that returns CONTIGUOUS hours
+    # (weighted CO 129.2 -> 112.8 and fulfilment UP on both plants).
+    #
+    # WIRED AS A PREFERENCE, NOT A PIN. It is the FIRST sort key in the pool
+    # choice below, so an allocated machine wins ties against load -- but the
+    # capacity test that follows is unchanged, so a GT whose allocated machine is
+    # full still spills to its next allowable one. The allocation can therefore
+    # reorder choices but can never make a GT unplaceable.
+    #
+    # It also cannot widen eligibility: `pool` comes from `_cand`, already
+    # filtered by the plant's allowable matrix. PLANNER_L4B_ALLOC=0 disables.
+    _arank: dict[tuple, int] = {}
+    if os.environ.get("PLANNER_L4B_ALLOC", "1") != "0":
+        _af = D / f"l4b_alloc_{a.month}.parquet"
+        if _af.exists():
+            _ad = pl.read_parquet(_af).sort("alloc_h", descending=True)
+            for _i, _r in enumerate(_ad.iter_rows(named=True)):
+                _k = (_r["plant"], _r["gt_code"], _r["machine"])
+                if _k not in _arank:
+                    _arank[_k] = 0 if _r["alloc_h"] > 0 else 9
+            print(f"  [l4b-alloc] {len(_arank)} (GT, machine) preferences loaded")
+
     gt_machines: dict[tuple, list] = {}
     # Most-constrained first: a GT with 3 options must claim before one with 11,
     # or it is left with nothing and starves at 75% load (6,271 TBR tyres did).
@@ -1316,7 +1360,8 @@ def main() -> None:
         left_q = need_q[(p, gt)]              # TYRES, not hours -- see above
         pool = list(cand)
         while left_q > 1e-9 and pool:
-            mm = min(pool, key=lambda x: (_rank.get(x, 99),
+            mm = min(pool, key=lambda x: (_arank.get((p, gt, x), 5),
+                                          _rank.get(x, 99),
                                           pen.get((p, gt, x), 0.0),
                                           load_h.get(x, 0.0), x))
             pool.remove(mm)

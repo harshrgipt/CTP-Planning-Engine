@@ -340,12 +340,42 @@ def main() -> None:
                                  .alias("prev"))
                    .filter(pl.col("prev").is_not_null()))
             if seq.height:
-                same = sum(1 for x in seq.iter_rows(named=True)
-                           if rim_of.get(x["gt_code"]) == rim_of.get(x["prev"]))
-                pct = 100.0 * same / seq.height
-                check(f"{p} same-size share of build changeovers",
-                      f"{pct:.1f}%", ">= 70%", pct >= 70.0,
-                      "plant July: PCR 91.5%, TBR 100%")
+                # KNOWN-RIM TRANSITIONS ONLY, AND REPORT THE COVERAGE BESIDE IT.
+                #
+                # This used to read `rim_of.get(a) == rim_of.get(b)` over EVERY
+                # transition, which is wrong in both directions:
+                #   * known vs UNKNOWN scored as different-size  -> deflates
+                #   * UNKNOWN vs UNKNOWN scored as SAME (None == None is True)
+                #     -> inflates. 16 PCR transitions on August 2026.
+                # Measured on runs/aug_v6: 60.9 % as reported against 82.3 % over
+                # the 72.4 % of transitions where both rims are actually known.
+                # A metric that silently counts "I don't know" as either answer
+                # is not a measurement, so the unknowns are now excluded and the
+                # coverage is published as its own invariant -- you can no longer
+                # read the share without seeing what it is a share OF.
+                rows = list(seq.iter_rows(named=True))
+                known = [x for x in rows
+                         if rim_of.get(x["gt_code"]) and rim_of.get(x["prev"])]
+                cov = 100.0 * len(known) / len(rows)
+                if known:
+                    same = sum(1 for x in known
+                               if rim_of[x["gt_code"]] == rim_of[x["prev"]])
+                    pct = 100.0 * same / len(known)
+                    check(f"{p} same-size share of build changeovers",
+                          f"{pct:.1f}%", ">= 70%", pct >= 70.0,
+                          f"known-rim transitions only ({len(known)}/{len(rows)}"
+                          f" = {cov:.1f}%); plant July PCR 91.5%, TBR 100%")
+                else:
+                    pct = 0.0
+                    check(f"{p} same-size share of build changeovers",
+                          "no known-rim pair", ">= 70%", False,
+                          "gt_size has no rim for any transition on this plant")
+                # Coverage is a MASTER-DATA invariant, not a scheduling one: a
+                # low value means gt_size is thin, and it caps how much the
+                # same-size figure above can be trusted.
+                check(f"{p} rim coverage of build transitions",
+                      f"{cov:.1f}%", ">= 95%", cov >= 95.0,
+                      "share of transitions where BOTH GTs have a rim in gt_size")
                 wmin = 0.0
                 for x in seq.iter_rows(named=True):
                     s_min, d_min = CO_MIN.get(x["machine"], CO_FALLBACK[p])

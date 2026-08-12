@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -37,6 +38,7 @@ import polars as pl
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from planner import paths                                        # noqa: E402
+from planner.cmbc import allowable                                # noqa: E402
 from planner.config import CONFIG, GT_SHELF_LIFE_H               # noqa: E402
 
 FINDINGS: list[dict] = []
@@ -127,7 +129,25 @@ def preflight(month: str) -> pl.DataFrame:
                 thin.height, "B12")
 
     # ---- 5. machine eligibility (R2 -- the allowable-machine check) -------
-    cm = pl.read_parquet(paths.wh_derived(f"cap_machine_{month}.parquet"))
+    # Check the ENFORCED eligibility, not the mined one. Before the allowable
+    # list became hard this reported "110/110 GTs have >=1 machine" while 19.9 %
+    # of PCR volume was landing on machines the plant forbids -- a gate that
+    # validates against the engine's own widened view cannot catch that.
+    cm_raw = pl.read_parquet(paths.wh_derived(f"cap_machine_{month}.parquet"))
+    cm = allowable.restrict(cm_raw, label="cap_machine", quiet=True)
+    if allowable.enabled():
+        am = allowable.matrix()
+        ruled = 0 if am is None else (
+            am.select(["plant", "gt_code"]).unique()
+            .join(per_gt.select(["plant", "gt_code"]), on=["plant", "gt_code"])
+            .height)
+        add("INFO", "allowable.enforced",
+            f"plant allowable list is HARD: cap_machine {cm_raw.height} -> "
+            f"{cm.height} rows; {ruled}/{per_gt.height} demanded GTs are ruled on")
+    else:
+        add("WARN", "allowable.soft",
+            "PLANNER_STRICT_ALLOWABLE=0 -- the plant's allowable machine list is "
+            "NOT enforced; INCH-eligible machines can be used at penalty 5000")
     elig = cm.group_by(["plant", "gt_code"]).agg(pl.len().alias("n_mach"))
     j = per_gt.join(elig, on=["plant", "gt_code"], how="left").with_columns(
         pl.col("n_mach").fill_null(0))
@@ -268,20 +288,32 @@ def preflight(month: str) -> pl.DataFrame:
             f"file={paths.opening_gt(month).name}")
 
     # ---- 11. partition freshness (the L7 gate, checked early) -------------
-    part = pl.read_parquet(paths.input_derived("gt_machine_partition.parquet"))
-    if "month" not in part.columns:
-        add("ERROR", "partition.unstamped",
-            "gt_machine_partition.parquet carries no month column")
+    # Mirror L7's own activation rule. With PLANNER_PARTITION_PLANTS empty the
+    # partition file is never opened, so its month stamp is irrelevant and
+    # blocking on it would refuse a run that is perfectly well defined.
+    part_plants = set(os.environ.get("PLANNER_PARTITION_PLANTS", "PCR")
+                      .replace(" ", "").split(","))
+    if part_plants == {""}:
+        add("INFO", "partition.off",
+            "PLANNER_PARTITION_PLANTS is empty -- no plant is partitioned, the "
+            "partition file is not read, L7 assigns machines dynamically")
     else:
-        months = part["month"].unique().to_list()
-        if months != [month]:
-            add("ERROR", "partition.stale",
-                f"partition was built for {months}, not {month} -- rebuild with "
-                f"`python scripts/build_gt_machine_partition.py {month}`. L7 will "
-                f"refuse to plan.", rule="L7")
+        part = pl.read_parquet(paths.input_derived("gt_machine_partition.parquet"))
+        if "month" not in part.columns:
+            add("ERROR", "partition.unstamped",
+                "gt_machine_partition.parquet carries no month column")
         else:
-            add("INFO", "partition.fresh",
-                f"{part.height} GT-machine rows stamped {month}")
+            months = part["month"].unique().to_list()
+            if months != [month]:
+                add("ERROR", "partition.stale",
+                    f"partition was built for {months}, not {month} -- rebuild "
+                    f"with `python scripts/build_gt_machine_partition.py {month}`."
+                    f" L7 will refuse to plan. (Or run unpartitioned with "
+                    f"PLANNER_PARTITION_PLANTS= )", rule="L7")
+            else:
+                add("INFO", "partition.fresh",
+                    f"{part.height} GT-machine rows stamped {month}, "
+                    f"partitioned plants: {sorted(part_plants)}")
 
     return pl.DataFrame(FINDINGS)
 

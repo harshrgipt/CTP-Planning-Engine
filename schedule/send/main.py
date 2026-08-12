@@ -122,6 +122,14 @@ def _partition_ok(month: str) -> bool:
 
 def _ensure_partition(month: str, env: dict[str, str], force: bool,
                       quiet: bool) -> None:
+    # Mirror L7's activation rule: with PLANNER_PARTITION_PLANTS empty no plant is
+    # partitioned, the file is never opened, and rebuilding it would demand the
+    # raw MES for an artefact this run will not read.
+    if set(env.get("PLANNER_PARTITION_PLANTS", "PCR")
+           .replace(" ", "").split(",")) == {""}:
+        print("  [03_partition] SKIPPED -- PLANNER_PARTITION_PLANTS is empty, "
+              "L7 assigns machines dynamically\n")
+        return
     if _partition_ok(month) and not force:
         print(f"  [03_partition] already stamped {month} -- reusing "
               f"(--force-partition to rebuild; needs raw MES)\n")
@@ -156,6 +164,13 @@ def _plan_core(a, env) -> Path:
           quiet=quiet)
     _step("02_l45_lotsize",
           [PY, "-m", "planner.cmbc.l45_lotsize", "--month", month], env, quiet=quiet)
+    # L4b GATES CURING ON BUILDING. Max-flow over the allowable GT x machine
+    # graph: if the month's build hours cannot be placed at all, L5 must not seat
+    # cure campaigns that building can never feed. PLANNER_FLOW_GATE=0 plans
+    # anyway and the shortfall becomes an expected, named number.
+    _step("02b_l4b_capacity_flow",
+          [PY, "-m", "planner.cmbc.l4b_capacity_flow", "--month", month], env,
+          quiet=False)
     _ensure_partition(month, env, getattr(a, "force_partition", False), quiet)
 
     if run_dir.exists():

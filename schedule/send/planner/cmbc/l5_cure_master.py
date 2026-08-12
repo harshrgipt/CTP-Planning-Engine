@@ -39,7 +39,7 @@ from pathlib import Path
 
 import polars as pl
 
-from planner.cmbc import plant_ct
+from planner.cmbc import allowable, plant_ct
 from planner.config import CONFIG, GT_SHELF_LIFE_H
 from planner import paths
 
@@ -64,6 +64,59 @@ def _opening_gt_path(root, month):
 SRC_INP = paths.INPUT_DERIVED
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
+
+
+def _load_delay(month: str) -> dict[tuple, float]:
+    """L6's reseat request: (plant, gt_code) -> hours to delay the cure seat.
+
+    Written by `planner/cmbc/l56_loop.py`. Absent = empty = no-op, so a plain
+    `python -m planner.cmbc.l5_cure_master` is byte-identical to before.
+    """
+    f = D / f"l56_delay_{month}.parquet"
+    if not f.exists():
+        return {}
+    d = pl.read_parquet(f)
+    return {(r["plant"], r["gt_code"]): float(r["delay_h"])
+            for r in d.iter_rows(named=True) if r["delay_h"]}
+
+
+_DELAY: dict[tuple, float] = {}
+
+
+def _load_split(month: str) -> dict[tuple, int]:
+    """L6's reseat request, split form: (plant, gt_code) -> how many pieces to
+    divide each of that GT's campaigns into.
+
+    WHY SPLIT AND NOT DELAY
+      Delaying an unfed campaign was measured on 2026-08: campaigns-unfed fell
+      111 -> 87, but in-month fed volume fell 458,863 -> 442,315. Every rightward
+      move pushes output past the reporting boundary, so delay trades the metric
+      it is trying to fix. Splitting does not move the seat -- it makes each
+      piece need a SHORTER contiguous build window, which is what the gaps in a
+      fragmented machine calendar can actually hold.
+
+      Two independent headroom tests support it. 95-100 % of unfed volume sits on
+      GTs below their R3 mould-concurrency cap, and ZERO unfed GTs are
+      build-rate limited -- for every one, its allowable machines can collectively
+      out-produce the cure draw. The volume is blocked by timing alone.
+
+    THE FLOOR IS NOT NEGOTIABLE
+      A split piece must stay at or above the cure-lot floor L4.5 actually
+      applied (max of the derived min_cure_lot and B12's min_lot_units). Splitting
+      below it would buy fulfilment by breaking B12 -- exactly the kind of
+      cap-violating "improvement" this project's ledger warns about. The factor
+      is therefore clamped per GT, and a GT whose campaigns are already at the
+      floor cannot be split at all.
+    """
+    f = D / f"l56_split_{month}.parquet"
+    if not f.exists():
+        return {}
+    d = pl.read_parquet(f)
+    return {(r["plant"], r["gt_code"]): int(r["factor"])
+            for r in d.iter_rows(named=True) if int(r["factor"]) > 1}
+
+
+_SPLIT: dict[tuple, int] = {}
 
 # Treat the horizon as a rolling WINDOW rather than a closed box: a campaign that
 # starts inside it may finish outside it, and the tail carries into next month.
@@ -265,9 +318,27 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="run directory name")
     a = ap.parse_args()
 
+    global _DELAY, _SPLIT
+    _DELAY = _load_delay(a.month)
+    _SPLIT = _load_split(a.month)
+    if _DELAY:
+        print(f"  [l5<->l6] {len(_DELAY)} GTs carry a reseat delay from L6 "
+              f"(max {max(_DELAY.values()):.1f} h)")
+    if _SPLIT:
+        print(f"  [l5<->l6] {len(_SPLIT)} GTs carry a SPLIT request from L6 "
+              f"(max factor {max(_SPLIT.values())}); floor-clamped per GT")
+
     P = json.loads(sorted(PARAMS.glob("params_*.json"))[-1].read_text())
     lots = pl.read_parquet(D / f"l45_lots_{a.month}.parquet").filter(
         pl.col("n_lots") > 0)
+    # PRESS PLATEN WINDOW IS NOT ENFORCED -- REMOVED 2026-08-11 by instruction.
+    # The underlying master is unusable: press_platen_master.rim_lo/rim_hi
+    # disagrees with the plant's own press_class_pcr (45 in recorded 14-20 where
+    # the plant states 12-16; the 46 in class invented outright), and the plant's
+    # allowed_press_matrix explicitly permits every pair the window rejected --
+    # 57 of 61 as `direct`, i.e. observed in real production. Two plant masters
+    # contradict each other, so press eligibility comes from allowed_press_matrix
+    # (already clean, 0 violations) and NOT from platen geometry.
     press = pl.read_parquet(D / f"cap_press_{a.month}.parquet")
     mould = pl.read_parquet(D / f"cap_mould_{a.month}.parquet")
     cav = pl.read_parquet(D / "l3_cavities.parquet")
@@ -472,6 +543,17 @@ def main() -> None:
         sizes = r.get("lot_sizes")
         sizes = (list(sizes) if sizes is not None and len(sizes)
                  else [float(r["lot_qty"])] * int(r["n_lots"]))
+        # ---- L6 SPLIT REQUEST, floor-clamped -----------------------------
+        _f = _SPLIT.get((r["plant"], r["gt_code"]), 1)
+        if _f > 1:
+            _fl = max(float(r.get("min_lot") or 0.0),
+                      float(CONFIG.thresholds.min_lot_units.get(r["plant"], 0)))
+            out = []
+            for q in sizes:
+                # never divide a piece below the floor L4.5 applied
+                k = max(1, min(_f, int(float(q) // _fl) if _fl > 0 else _f))
+                out.extend([float(q) / k] * k)
+            sizes = out
         for i, q in enumerate(sizes):
             jobs.append({"plant": r["plant"], "gt_code": r["gt_code"],
                          "mould_set": r["mould_set"], "qty": float(q), "seq": i})
@@ -657,6 +739,15 @@ def main() -> None:
         cap = moulds.get((p, gt), 1)
 
         floor_ts = earliest_cure(p, gt, j['qty'], j['qty'] / max(rate, 1e-9))
+        # ---- L5<->L6 FEEDBACK -------------------------------------------
+        # L6 hands back campaigns building could not feed and asks for them to be
+        # RESEATED LATER, not failed. The hint is a per-GT delay in hours, so the
+        # cure seat moves instead of the shortfall being discovered slice by slice
+        # in L7. Absent file = clean no-op, so a single L5 run is unchanged.
+        if _DELAY:
+            _d = _DELAY.get((p, gt), 0.0)
+            if _d:
+                floor_ts = max(floor_ts, t0 + timedelta(hours=_d))
         best = None
         for pr in cand:
             st = max(free.get(pr, t0), floor_ts)
