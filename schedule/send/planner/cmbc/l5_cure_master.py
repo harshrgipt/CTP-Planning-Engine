@@ -207,6 +207,8 @@ HORIZON_TAIL_H = float(os.environ.get("PLANNER_HORIZON_TAIL_H", "72"))
 # L7 cannot feed campaigns that start before any tyre exists. Stock is what makes
 # an early start real; a smaller number does not.
 EARLY_STOCK = os.environ.get("PLANNER_EARLY_STOCK", "1") != "0"
+# Warm-start floor for the campaign that OPENS a press -- see earliest_cure.
+WARM_OPEN = os.environ.get("PLANNER_WARM_OPEN", "0") != "0"   # measured -0.1 pt
 
 # Basis for the day-1 cure floor. See earliest_cure(). "star" is the legacy
 # 11.86 h wall built from two MEDIANS; "min" and "slice" use the physical
@@ -449,6 +451,79 @@ def main() -> None:
         r = PCT.press_rate(p, gt)
         return r if r else rate_p[p]
 
+    # ---- BUILD-ORDER STAGGER: when can building actually REACH this GT? ----
+    # Measured July day 1: building touches 9 GTs in the first 2 h, 15 by 8 h,
+    # 19 by 12 h, 28 by 24 h -- because 11 machines each build ONE GT at a time
+    # and the B12 floor makes every run at least 150 tyres (2.08 h on PCR).
+    #
+    # The flat tau* + band floor ignores this completely: it makes the GT whose
+    # machine starts it at minute 0 wait 11.86 h, and releases the GT that
+    # building cannot reach until hour 10 at the same moment. Both are wrong,
+    # in opposite directions.
+    #
+    # The physical wait is: tau_min + (how many GTs are queued ahead of me on my
+    # own machine) x one legal run. So GTs are ranked within each machine by
+    # volume -- biggest first, which is the order L7 releases them in -- and the
+    # k-th GT on a machine becomes curable at tau_min + (k+1) x lot_build_h.
+    # First GT per machine -> 2.35 h, second -> 4.43 h, third -> 6.51 h ...
+    #
+    # This asserts NO pre-month building. It only replaces one plant-wide median
+    # with each GT's own place in the build queue.
+    _stag: dict[tuple, float] = {}
+    if FLOOR_BASIS == "stagger":
+        _cmf = D / f"cap_machine_{a.month}.parquet"
+        if _cmf.exists():
+            _cm = pl.read_parquet(_cmf)
+            try:
+                from planner.cmbc import allowable as _alw
+                _cm = _alw.restrict(_cm, quiet=True)
+                _cm = _alw.restrict_rimlock(_cm, quiet=True)
+            except Exception:
+                pass
+            _vol = {(r["plant"], r["gt_code"]): float(r["qty"])
+                    for r in lots.group_by(["plant", "gt_code"]).agg(
+                        (pl.col("lot_qty") * pl.col("n_lots")).sum().alias("qty")
+                    ).iter_rows(named=True)}
+            _bymc: dict[tuple, list] = {}
+            _seen: set = set()
+            for r in _cm.sort("penalty").iter_rows(named=True):
+                k = (r["plant"], r["gt_code"])
+                if k in _seen:
+                    continue
+                _seen.add(k)
+                _bymc.setdefault((r["plant"], r["machine"]), []).append(k)
+            for _mk, _gts in _bymc.items():
+                _gts.sort(key=lambda k: -_vol.get(k, 0.0))
+                for _i, _k in enumerate(_gts):
+                    _stag[_k] = float(_i)
+            print(f"  [stagger] {len(_stag)} GTs ranked in their machine's build "
+                  f"queue; first per machine curable at tau_min + 1 lot")
+
+    # ---- WARM MACHINES AT t0 --------------------------------------------
+    # `machine_warm_<month>.parquet` (scripts/derive_machine_warm.py) names the
+    # GT each building machine was running at 06:59, recovered from the build
+    # timestamps of the opening stock: the tyres built in the final hour before
+    # t0 fall on exactly 11 GTs for PCR's 11 machines and 10 for TBR's 9.
+    #
+    # For those GTs supply is REAL from minute one -- the machine is threaded,
+    # staffed and mid-run -- so their presses need not wait tau* + build_band.
+    # Every other GT keeps the full floor, which is what distinguishes this from
+    # the six global floor experiments (lot / stagger / slice / min / warm-open /
+    # feed-condition): those released ALL presses early, so presses started and
+    # starved. Here only the ~11 GTs per plant whose supply genuinely exists at
+    # t0 are released.
+    #
+    # No pre-month production is claimed: these tyres are already counted in the
+    # opening stock.
+    _warm: set = set()
+    if os.environ.get("PLANNER_MACHINE_WARM", "1") != "0":
+        _wmf = D / f"machine_warm_{a.month}.parquet"
+        if _wmf.exists():
+            for _r in pl.read_parquet(_wmf).iter_rows(named=True):
+                _warm.add((_r["plant"], _r["gt_code"]))
+            print(f"  [warm-mc] {len(_warm)} (plant, GT) pairs were mid-run on a "
+                  f"machine at t0 -- released at tau_min")
+
     def earliest_cure(plant: str, gt: str, qty: float = 0.0,
                       hours: float = 0.0) -> datetime:
         """Earliest a press may start curing this campaign, from the pull equation.
@@ -476,7 +551,31 @@ def main() -> None:
         # (10-20 min/cycle on PCR), not of the plant. `gap_tyres[plant]` is the
         # fallback when the plant file does not name this GT.
         _gr = rate_of(plant, gt)
-        _gap_q = (tau_h[plant] + bband[plant]) * _gr
+        # ---- HOW MUCH STOCK IS ENOUGH TO START AT t0 ----------------------
+        # The old test asked the stock to cover `tau* + build_band` = 11.86 h on
+        # PCR, i.e. 72 tyres per press. Both terms are MEDIANS -- tau* is the
+        # plant's median coupling buffer and build_band the median campaign
+        # LENGTH -- and neither describes when the FIRST tyre arrives. That is
+        # the same mined-median-as-a-floor defect PARTITION section 1 records,
+        # applied to the start of the horizon.
+        #
+        # Physically the stock only has to last until building can hand over its
+        # first LEGAL run: one B12 lot (PCR 150 / TBR 70) at this GT's own build
+        # cadence, then tau_min of ageing. On PCR that is
+        #     0.25 h + 150 x 50 s = 2.33 h  ->  14 tyres per press,
+        # against the 72 the old test demanded -- a 5.1x overstatement (TBR 3.4x).
+        # A press holding 50 tyres of its GT can therefore start immediately: it
+        # cures for 8.2 h while building delivers a full 150-tyre lot in 2.1 h.
+        #
+        # PLANNER_T0_STOCK_BASIS=star restores the old median test for A/B.
+        _basis = os.environ.get("PLANNER_T0_STOCK_BASIS", "star")
+        if _basis == "star":
+            _gap_h = tau_h[plant] + bband[plant]
+        else:
+            _floor = float(CONFIG.thresholds.min_lot_units.get(plant, 0) or 0)
+            _ct = PCT.build_ct_s(plant, gt, None) or plant_cad_s[plant]
+            _gap_h = tau_min_h[plant] + _floor * _ct / 3600.0
+        _gap_q = _gap_h * _gr
         _stk = early_budget.get((plant, gt), 0.0) if EARLY_STOCK else 0.0
         if _stk >= _gap_q:
             return t0
@@ -513,6 +612,40 @@ def main() -> None:
             return t0 + timedelta(hours=tau_h[plant] + bband[plant])
         if FLOOR_BASIS == "slice":
             return t0 + timedelta(hours=tau_min_h[plant])
+        # A GT whose machine was already running it at t0 has real supply from
+        # minute one; it waits only for the first tyre to age.
+        if (plant, gt) in _warm:
+            return t0 + timedelta(hours=tau_min_h[plant])
+        if FLOOR_BASIS == "stagger":
+            _ct = PCT.build_ct_s(plant, gt, None) or plant_cad_s[plant]
+            _fl = float(CONFIG.thresholds.min_lot_units.get(plant, 0) or 0)
+            _lot_h = _fl * _ct / 3600.0
+            _k = _stag.get((plant, gt), 3.0)      # unranked -> assume 4th in queue
+            return t0 + timedelta(hours=tau_min_h[plant] + (_k + 1.0) * _lot_h)
+        if FLOOR_BASIS == "lot":
+            # THE PHYSICAL FLOOR, and the only one of the four that is derived
+            # rather than mined. A press cannot cure a GT until building has
+            # produced ONE LEGAL RUN of it -- the B12 floor, PCR 150 / TBR 70, at
+            # this GT's own cadence -- and that run has aged tau_min.
+            #
+            #   PCR  0.27 h + 150 x 50 s  = 2.35 h      (shipped "star" = 11.86 h)
+            #   TBR  0.27 h +  70 x 140 s = 2.99 h      (shipped "star" = 10.18 h)
+            #
+            # "star" adds tau* (the plant's MEDIAN coupling buffer, so 47 % of
+            # plant tyres cure sooner) to build_band (the MEDIAN campaign LENGTH,
+            # not the time to build the first lot). Neither is a minimum, which
+            # is the mined-median-as-a-floor defect PARTITION section 1 records
+            # twice. "min" and "slice" only half-fix it: "min" keeps the median
+            # band, "slice" drops the build time altogether and pretends a tyre
+            # exists at tau_min with nothing having been built.
+            #
+            # This claims NO pre-month building and NO borrowed June capacity --
+            # it only stops asserting a press must wait 11.86 h when the tyre it
+            # needs is legally buildable in 2.35 h.
+            _ct = PCT.build_ct_s(plant, gt, None) or plant_cad_s[plant]
+            _floor = float(CONFIG.thresholds.min_lot_units.get(plant, 0) or 0)
+            return t0 + timedelta(
+                hours=tau_min_h[plant] + _floor * _ct / 3600.0)
         return t0 + timedelta(hours=tau_min_h[plant] + bband[plant])
     ndays = (datetime(y + (m == 12), (m % 12) + 1, 1) - datetime(y, m, 1)).days
     # TWO BOUNDARIES, DELIBERATELY DISTINCT.
@@ -568,7 +701,44 @@ def main() -> None:
     _sz = pl.read_parquet(SRC_INP / "gt_size.parquet")
     _rim = {r["gt_code"]: (r["rim"] or "") for r in _sz.iter_rows(named=True)
             if r.get("gt_code")}
-    jobs.sort(key=lambda j: (j["plant"], -j["qty"], j["gt_code"], j["seq"]))
+    # ---- DEPTH BEFORE BREADTH -------------------------------------------
+    # Sorting purely by -qty interleaves GTs: the biggest lot of GT A, then the
+    # biggest of GT B, and so on. At t0 all 86 PCR presses are free, so that
+    # opens 30 distinct GTs on day 1 -- while building, with 11 machines and a
+    # 150-tyre minimum run, can only touch 9 GTs in the first two hours. The
+    # presses for the other 21 start and starve.
+    #
+    # Measured: only 1 of those 30 GTs was at its R3 mould cap. GT 1513 held 13
+    # presses against 35 moulds, GT 2267 six against 34. Mould capacity was never
+    # the limit -- the QUEUE ORDER was. On mould capacity alone 11 GTs could fill
+    # the whole floor.
+    #
+    # So GTs are ordered by total month volume and their lots kept together: a
+    # GT fills its own moulds before the next GT opens. Same campaigns, same
+    # start times, same floors -- only WHICH GT a press takes changes. That is
+    # why it does not compress building's window, unlike the five floor
+    # experiments (lot / stagger / slice / min / warm-open) which all raised day 1
+    # and lost more across the month.
+    #
+    # MEASURED 2026-08-13 AND REJECTED -- SHIPS OFF (PLANNER_D1_DEPTH=0).
+    #     PCR 95.6 -> 83.7 pt   TBR 96.3 -> 88.8 pt   unfed 6,547 -> 27,338
+    # This is the failure the note above already warned about: displacing -qty
+    # from the sort key destroys the SCARCITY PRIORITY that large campaigns
+    # depend on. Ordering by GT total spreads the biggest GT's lots across the
+    # whole month first, and every small GT is then seated last, at the horizon,
+    # where building cannot reach it. The day-1 GT count is a SYMPTOM of the
+    # queue being size-ordered, not a cause -- and the size order is load-bearing.
+    #
+    # Set PLANNER_D1_DEPTH=1 only to reproduce this measurement.
+    if os.environ.get("PLANNER_D1_DEPTH", "0") != "0":
+        _gtq: dict[tuple, float] = {}
+        for _j in jobs:
+            _k = (_j["plant"], _j["gt_code"])
+            _gtq[_k] = _gtq.get(_k, 0.0) + _j["qty"]
+        jobs.sort(key=lambda j: (j["plant"], -_gtq[(j["plant"], j["gt_code"])],
+                                 j["gt_code"], -j["qty"], j["seq"]))
+    else:
+        jobs.sort(key=lambda j: (j["plant"], -j["qty"], j["gt_code"], j["seq"]))
 
     # Use the floor L4.5 ACTUALLY applied (max of the derived min_cure_lot and
     # the B12 fixed floor), not B12's alone. Reading only config.min_lot_units
@@ -588,6 +758,49 @@ def main() -> None:
 
     free: dict[str, datetime] = {}                    # press -> next free time
     last_gt: dict[str, str] = {}                      # press -> GT last run
+
+    # ---- WARM START: WHAT EACH PRESS WAS ALREADY CURING -------------------
+    # Every press used to start blank, so L5 assigned GTs to presses afresh at
+    # t0 and the opening stock -- which sits on the GTs the plant was ACTUALLY
+    # running -- landed on the wrong presses. Measured July: 4,820 PCR tyres of
+    # stock spread over 25 of 48 demanded GTs, 50 of 86 presses waiting 11.86 h,
+    # and 280 press-hours of stock value unrealised.
+    #
+    # Seeding `last_gt` from the end-of-previous-month mould snapshot makes a
+    # press that continues its own GT pay NO mould change, so it frees earliest
+    # and wins the seat -- which is exactly how the plant's day 1 works, and why
+    # its stock always matches its presses.
+    #
+    # This is a STATE, not production: no tyre is built before t0. It only stops
+    # us pretending every press was empty and unconfigured at 07:00.
+    # SHIPS OFF -- MONTH-DEPENDENT, WHICH MEANS IT IS NOISE, NOT SIGNAL.
+    #     July PCR 95.3 -> 95.9 (+0.6)      August PCR 90.8 -> 90.3 (-0.5)
+    # It was adopted on a July-only A/B and never tested on August. A flag that
+    # helps one month and hurts the next by a similar margin is not an
+    # improvement, it is a fit to one month's data. Both months resolve ~43 % of
+    # presses, so the difference is not a data-quality artefact.
+    #
+    # RULE THIS ESTABLISHED: a change ships only if it is NON-NEGATIVE ON BOTH
+    # MONTHS. Two flags failed that test on 2026-08-13 (this one and
+    # T0_STOCK_BASIS=lot) and both had been adopted on July alone.
+    #
+    # NOT a data-quality artefact: August resolves MORE presses than July
+    # (PCR 66/77 = 86 % vs 67/85 = 79 %). The effect itself is month-dependent.
+    # Gate any future re-measure with scripts/ab_both_months.py.
+    # PLANNER_WARM_PRESS=1 to re-measure.
+    if os.environ.get("PLANNER_WARM_PRESS", "0") != "0":
+        _wf = SRC_INP / f"running_moulds_{a.month}.parquet"
+        if _wf.exists():
+            _w = pl.read_parquet(_wf)
+            if "current_gt" in _w.columns:
+                _w = _w.filter(pl.col("is_current")
+                               & pl.col("current_gt").is_not_null())
+                _n = 0
+                for _r in _w.iter_rows(named=True):
+                    last_gt[str(_r["press"])] = _r["current_gt"]
+                    _n += 1
+                print(f"  [warm] {_n} presses seeded with the GT they were "
+                      f"already running at month start")
 
     # ================= LEVEL-LOADED PRESS-CONCURRENCY BUDGET ==============
     # Partition tag per (plant, gt). ALL always; plus the TT/TL dedication on
@@ -739,6 +952,33 @@ def main() -> None:
         cap = moulds.get((p, gt), 1)
 
         floor_ts = earliest_cure(p, gt, j['qty'], j['qty'] / max(rate, 1e-9))
+        # ---- WARM-START FLOOR, OPENING CAMPAIGN ONLY -----------------------
+        # Measured July: building runs at FULL rate on day 1 (PCR 12,946) and
+        # finishes the month at 77.6 % machine occupancy with 1,830 h idle. The
+        # tyres exist. What idles 50 of 86 presses for the first 11.86 h is the
+        # CURE-side floor, not supply.
+        #
+        # tau* + build_band is the steady-state coupling buffer. It is the right
+        # phasing for a campaign that follows another on the same press, and the
+        # WRONG floor for the campaign that OPENS a press at t0: there is no
+        # preceding campaign to be buffered against, and building only needs to
+        # deliver one legal B12 run (PCR 2.35 h / TBR 2.99 h) before curing can
+        # begin.
+        #
+        # Lowering the floor for EVERY campaign was measured and is worse
+        # (-0.9 pt): it shifts the whole month earlier and compresses the window
+        # building has to fill. So it is applied ONLY to the opening campaign on
+        # a press -- the one whose press is still free at t0 -- leaving the
+        # steady-state phasing of every later campaign untouched.
+        #
+        # This claims NO pre-month building: the tyres are built after t0, in the
+        # month, by machines that are already idle at that hour.
+        _opening = all(free.get(_pr, t0) <= t0 for _pr in cand)
+        if WARM_OPEN and _opening:
+            _ct = PCT.build_ct_s(p, gt, None) or plant_cad_s[p]
+            _fl = float(CONFIG.thresholds.min_lot_units.get(p, 0) or 0)
+            floor_ts = min(floor_ts,
+                           t0 + timedelta(hours=tau_min_h[p] + _fl * _ct / 3600.0))
         # ---- L5<->L6 FEEDBACK -------------------------------------------
         # L6 hands back campaigns building could not feed and asks for them to be
         # RESEATED LATER, not failed. The hint is a per-GT delay in hours, so the

@@ -1,14 +1,64 @@
-CTP-PLANNER  v8  ·  2026-08-12
+CTP-PLANNER  v13  ·  2026-08-13
 
 There is no git history behind this snapshot, so the version marker is a DATE
 STAMP plus an arm generation (v8 = the eighth measured configuration).
 
 SHIPPED PACKS
-  output/V8_JUL2026_pack/    July 2026    PCR 92.2 % / TBR 95.7 % in-month
-  output/V8_AUG2026_pack/    August 2026  PCR 86.8 % / TBR 94.6 % in-month
+  output/V13_JUL2026_pack/   July 2026    PCR 96.2 % / TBR 95.7 % in-month
+  output/V13_AUG2026_pack/   August 2026  PCR 91.4 % / TBR 89.4 % in-month
+
+  Quoted from l11_invariants.parquet, basis "IN-MONTH output vs plannable
+  requirement, THIS PLANT" = built + opening - closing. This is the ONLY
+  fulfilment basis this file quotes.
+
+  !! v12's figures were WRONG -- a sweep harness summed `qty_fed_in_month`,
+  the FED basis (tyres delivered into presses, which INCLUDES opening stock),
+  and reported it as in-month. Fifth measurement-basis defect in this project
+  and the first one introduced by tooling rather than by a layer. The v12 flag
+  decisions were re-run on the correct basis before v13 shipped; two of them
+  did not survive (below). Retired the harness -- use scripts/ab_both_months.py,
+  which reads L11 and names its basis.
 
   Both: 0 allowable violations · 0.0 % sub-floor runs · R5 max <= 72 h ·
-  100 % rim coverage · 15/15 tests pass.
+  100 % rim coverage · GT inventory below both rails · 15/15 tests pass.
+
+WHAT CHANGED v8 -> v12
+  v9   plant's own allowable matrices (INPUT/allowable machine/) -- PCR GTs
+       ruled on 108 -> 235, an 11th PCR machine became usable, August PCR's
+       arithmetic infeasibility removed.  Aug PCR +2.4 pt.
+  v10  scarcity-first L4b allocation -- fixed a real defect where L4b allocated
+       TBMPCR7 zero hours while L7 put 32,939 tyres on it. PCR7 0 -> 707 h.
+  v11  GT_WIP_RAIL_MARGIN 0.94 -> 1.0 (uses the STATED cap, breaches nothing;
+       the rail was blocking 159 make-room rescues) + the corrected allocation
+       shipped.  July +2.5 pt.
+  v12  press continuity from the running-mould snapshot and the
+       physically-correct t0 stock threshold (tau_min + one legal lot, was
+       tau* + median campaign length -- 5.1x too high on PCR).
+       BOTH REVERTED IN v13 -- see below.
+  v13  OVERFITTING CORRECTION. v12's two flags were adopted on a July-only
+       A/B. Re-measured on BOTH months on the in-month basis:
+
+         PLANNER_WARM_PRESS=1        Jul PCR +0.6   Aug PCR -0.5, L11 -1
+         PLANNER_T0_STOCK_BASIS=lot  Jul TBR +0.1   Aug TBR -0.7, L11 -2
+
+       Both now default OFF/star. Cost July 0.6 pt PCR that was never real
+       generalisation; recovered August TBR 0.7 pt and 2 invariants on a pack
+       that ships to the plant.
+
+       NOT a data artefact: August resolves MORE presses than July for the
+       warm-press bridge (PCR 86 % vs 79 %). The effect is month-dependent.
+
+       The two months differ in exactly the ways that matter -- July's demand
+       IS the plant's own July output (100 % achievable, no partition, 48 PCR
+       GTs); August is a forward order book, arithmetically infeasible by
+       ~3.2 pt, partitioned, 73 PCR GTs, tighter TBR allowable matrix. A flag
+       tuned on July is tuned on the easy month.
+
+       new: scripts/ab_both_months.py  runs any candidate flag against current
+       defaults on both months and exits REJECT unless NON-NEGATIVE ON BOTH,
+       per plant, 0.05 pt tolerance. "Net positive across the two" is NOT
+       sufficient: a +0.6/-0.5 flag is noise with a sign, and shipping it
+       degrades a real pack to flatter a backtest.
 
 WHAT CHANGED SINCE 2026-08-10 (v1)
   allowable machine list   NOW HARD. It was a frozen input nothing read; 19.9 %

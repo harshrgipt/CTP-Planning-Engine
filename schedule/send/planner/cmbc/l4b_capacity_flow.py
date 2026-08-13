@@ -178,7 +178,25 @@ def analyse(month: str) -> tuple[pl.DataFrame, pl.DataFrame, dict]:
 def main() -> None:
     ap = argparse.ArgumentParser(description="pre-L5 building feasibility, by max-flow")
     ap.add_argument("--month", default="2026-08")
+    ap.add_argument("--run", default=None,
+                    help="with --timed: the run whose cure_campaigns supply deadlines")
+    ap.add_argument("--timed", action="store_true",
+                    help="deadline-aware ALLOCATION only; runs after L5, before L7")
     a = ap.parse_args()
+
+    if a.timed:
+        if not a.run:
+            raise SystemExit("--timed needs --run")
+        al, s = allocate_timed(a.month, a.run)
+        al.write_parquet(paths.wh_derived(f"l4b_alloc_{a.month}.parquet"))
+        print(f"\n  L4b DEADLINE-AWARE ALLOCATION  {a.month}  (from runs/{a.run})")
+        for p, v in s.items():
+            print(f"    {p}: {v['machines_used']} machines · families/machine "
+                  f"mean {v['families_per_machine_mean']} max "
+                  f"{v['families_per_machine_max']} · unplaced {v['unplaced_h']:,.0f} h"
+                  f" · deadline span {v['deadline_span_h']:,.0f} h")
+        print(f"  -> l4b_alloc_{a.month}.parquet ({al.height} rows)\n")
+        return
 
     gt, mach, s = analyse(a.month)
     gt.write_parquet(paths.wh_derived(f"l4b_flow_gt_{a.month}.parquet"))
@@ -230,34 +248,42 @@ def main() -> None:
     _ = CONFIG
 
 
-if __name__ == "__main__":
-    main()
-
 
 # ==========================================================================
-# B -- FAMILY-MINIMISING ALLOCATION
+# B -- SCARCITY-FIRST, SAME-RIM ALLOCATION
 # ==========================================================================
-# Max-flow proves the month CAN be built. It does not say WHERE it should be,
-# and any feasible flow will do -- so the flow happily spreads one rim across
-# every machine that can take it. That is the structural cause of PCR's setup
-# bill: L7 inherits a scattered allocation and can only reorder inside it.
+# Max-flow proves the month CAN be built. It does not say WHERE, and any feasible
+# flow will do -- so it spreads one rim across every machine that can take it.
 #
-# This pass re-allocates the SAME hours with a second objective: minimise the
-# number of rim families a machine has to carry. Fewer families per machine ->
-# fewer different-size changeovers -> setup time returns as CONTIGUOUS hours,
-# which is what the rim-fill result showed is worth more than average hours
-# (weighted CO 129.2 -> 112.8 min/machine-day and fulfilment UP, both plants).
+# THE DEFECT THIS REPLACES (found 2026-08-12, July PCR)
+#   The first version ordered by RIM FAMILY SIZE and filled machines greedily, so
+#   widely-eligible machines claimed the work first and narrow ones got nothing:
 #
-# GREEDY, FAMILY-FIRST, CAPACITY-RESPECTING -- no MILP (project rule):
-#   1. order rim families by total hours, largest first
-#   2. for each family, order its GTs largest first
-#   3. place each GT on the eligible machine that ALREADY carries its family and
-#      still has room; else the emptiest eligible machine
-#   4. split across machines only when one cannot hold the GT
+#       machine        GTs L4b allocated    GTs L7 actually built
+#       TBMPCR7                        0                        1
+#       TBMPCR10                       1                        7
 #
-# It never widens eligibility: every candidate comes from the same allowable-
-# and-rimlock-filtered set the flow used, so allocation cannot introduce a
-# violation. A GT that does not fit anywhere is reported, not forced.
+#   TBMPCR7 may build only 6 of July's 48 demanded PCR GTs. Allocating it LAST
+#   meant its few eligible GTs had already gone elsewhere, so it idled 287 h --
+#   and L7 then dumped 32,939 tyres of a single GT on it anyway. The allocator
+#   and the placer disagreed about the same machine.
+#
+# THE RULE, WHICH IS L7'S OWN AND WAS MISSING HERE
+#   Most-constrained-first. L7 already assigns "a GT with 3 options must claim
+#   before one with 11"; the allocator now does the same from the MACHINE side --
+#   a machine few GTs can reach gets first pick of the GTs that can reach it.
+#   Flexible machines are then left free to absorb the variety, which is also
+#   what keeps their family count (and their changeover bill) down.
+#
+# ORDER WITHIN A MACHINE -- the plant's own sequencing preference
+#   1. anchor: the largest eligible GT, i.e. the work this machine exists for
+#   2. remaining GTs of the SAME RIM            -> same-size changeover
+#   3. inside that rim, same sister / construction cluster ranked first
+#   4. other rims only when nothing same-rim remains
+#   ties break on largest remaining shortfall, so scarce hours buy the most.
+#
+#   Sister and cluster rank ONLY INSIDE A RIM. Cross-rim similarity reordering
+#   was measured on this codebase and cost 25,549 tyres -- see l5_cure_master.
 def allocate(month: str) -> tuple[pl.DataFrame, dict]:
     import calendar
     y, m = int(month[:4]), int(month[5:7])
@@ -273,6 +299,19 @@ def allocate(month: str) -> tuple[pl.DataFrame, dict]:
           .select(["plant", "gt_code", "rim"]).unique(subset=["plant", "gt_code"]))
     rim_of = {(r["plant"], r["gt_code"]): (r["rim"] or "?")
               for r in sz.iter_rows(named=True)}
+
+    # sister / construction cluster -- used ONLY to rank inside a rim
+    fam_of: dict[tuple, str] = {}
+    f = paths.input_derived("gt_sister_group.parquet")
+    if f.exists():
+        for r in pl.read_parquet(f).iter_rows(named=True):
+            fam_of[(r["plant"], r["gt_code"])] = str(r.get("sister_id") or "")
+    f = paths.input_derived("sku_con_cluster.parquet")
+    if f.exists():
+        for r in pl.read_parquet(f).iter_rows(named=True):
+            k = (r["plant"], r["gt_code"])
+            if not fam_of.get(k):
+                fam_of[k] = "cl" + str(r.get("con_cluster"))
     PCT = plant_ct.get()
 
     rows, summary = [], {}
@@ -285,50 +324,240 @@ def allocate(month: str) -> tuple[pl.DataFrame, dict]:
         for r in el.iter_rows(named=True):
             elig.setdefault(r["gt_code"], []).append(r["machine"])
         machines = sorted(el["machine"].unique().to_list())
-        free = {mc: cap_h for mc in machines}
-        fams: dict[str, set] = {mc: set() for mc in machines}
 
-        need: list[tuple[str, str, float, float]] = []   # fam, gt, hours, qty
+        need_h: dict[str, float] = {}
+        need_q: dict[str, float] = {}
         for r in rq.iter_rows(named=True):
             g, q = r["gt_code"], float(r["gross_build"])
             ms = elig.get(g, [])
             if not ms:
                 continue
-            cts = [PCT.build_ct_s(plant, g, mc) or 0.0 for mc in ms]
-            cts = [c for c in cts if c] or [60.0]
-            need.append((rim_of.get((plant, g), "?"), g,
-                         q * (sum(cts) / len(cts)) / 3600.0, q))
+            cts = [c for c in (PCT.build_ct_s(plant, g, mc) or 0.0 for mc in ms) if c]
+            cts = cts or [60.0]
+            need_h[g] = q * (sum(cts) / len(cts)) / 3600.0
+            need_q[g] = q
 
-        fam_h: dict[str, float] = {}
-        for fam, _g, h, _q in need:
-            fam_h[fam] = fam_h.get(fam, 0.0) + h
-        need.sort(key=lambda x: (-fam_h[x[0]], x[0], -x[2], x[1]))
+        reach: dict[str, list[str]] = {mc: [] for mc in machines}
+        for g, ms in elig.items():
+            if g in need_h:
+                for mc in ms:
+                    reach[mc].append(g)
+        free = {mc: cap_h for mc in machines}
+        fams: dict[str, set] = {mc: set() for mc in machines}
+        left = dict(need_h)
 
-        unplaced = 0.0
-        for fam, g, h, q in need:
-            cands = elig[g]
-            left = h
-            while left > 1e-9:
-                # prefer a machine already carrying this family, then the emptiest
-                pool = [mc for mc in cands if free[mc] > 1e-9]
-                if not pool:
-                    unplaced += left
+        # MACHINES IN ORDER OF INCREASING FLEXIBILITY -- narrow ones pick first
+        for mc in sorted(machines, key=lambda x: (len(reach[x]), x)):
+            mine = [g for g in reach[mc] if left.get(g, 0.0) > 1e-9]
+            if not mine:
+                continue
+            mine.sort(key=lambda g: -left[g])
+            anchor = mine[0]
+            a_rim = rim_of.get((plant, anchor), "?")
+            a_fam = fam_of.get((plant, anchor), "")
+
+            # PRIORITY, in the plant's stated order:
+            #   hard feasibility  (already applied -- `mine` is eligible only)
+            #   -> GT scarcity / risk of stranding
+            #   -> same rim
+            #   -> largest shortfall
+            #   -> sister / construction cluster, INSIDE the rim
+            #   -> load balance (the machine loop itself)
+            #
+            # GT SCARCITY COMES BEFORE SAME-RIM, and that ordering is the point.
+            # A GT with 2 eligible machines that loses both to same-rim
+            # preference is STRANDED -- it has nowhere else to go -- whereas a
+            # GT with 9 machines can always be placed later. Ranking rim above
+            # scarcity buys a same-size changeover and pays for it with volume
+            # that becomes unbuildable.
+            #
+            # Cure deadline is NOT in this key: L4b runs BEFORE L5, so no cure
+            # seat exists yet to read a deadline from. Adding it means moving the
+            # allocation after L5, which reorders the pipeline -- worth doing, but
+            # as its own measured change, not smuggled in here.
+            def _key(g: str, _a=anchor, _ar=a_rim, _af=a_fam) -> tuple:
+                r = rim_of.get((plant, g), "?")
+                fm = fam_of.get((plant, g), "")
+                return (0 if g == _a else 1,               # anchor
+                        len(elig.get(g, [])),              # scarcity: fewest first
+                        0 if r == _ar else 1,              # same rim
+                        -left[g],                          # largest shortfall
+                        0 if (r == _ar and fm and fm == _af) else 1)  # sister/cluster
+
+            for g in sorted(mine, key=_key):
+                if free[mc] <= 1e-9:
                     break
-                pool.sort(key=lambda mc: (fam not in fams[mc], -free[mc], mc))
-                mc = pool[0]
-                take = min(left, free[mc])
+                take = min(left[g], free[mc])
+                if take <= 1e-9:
+                    continue
                 free[mc] -= take
-                fams[mc].add(fam)
+                left[g] -= take
+                fams[mc].add(rim_of.get((plant, g), "?"))
                 rows.append({"plant": plant, "gt_code": g, "machine": mc,
-                             "family": fam, "alloc_h": round(take, 3),
-                             "alloc_qty": round(q * take / h, 1) if h else 0.0})
-                left -= take
+                             "family": rim_of.get((plant, g), "?"),
+                             "alloc_h": round(take, 3),
+                             "alloc_qty": round(need_q[g] * take / need_h[g], 1)
+                             if need_h[g] else 0.0})
+
+        unplaced = sum(v for v in left.values() if v > 1e-9)
         fpm = [len(v) for mc, v in fams.items() if cap_h - free[mc] > 1e-9]
         summary[plant] = {
             "machines_used": len(fpm),
-            "families": len(fam_h),
+            "families": len({rim_of.get((plant, g), "?") for g in need_h}),
             "families_per_machine_mean": round(sum(fpm) / max(len(fpm), 1), 2),
             "families_per_machine_max": max(fpm) if fpm else 0,
             "unplaced_h": round(unplaced, 1),
         }
     return pl.DataFrame(rows), summary
+
+# ==========================================================================
+# B2 -- DEADLINE-AWARE ALLOCATION.  Runs AFTER L5, before L7.
+# ==========================================================================
+# WHY THE PRE-L5 ALLOCATION WAS NOT ENOUGH
+#   `allocate()` runs before L5 exists, so it distributes machine HOURS with no
+#   idea WHEN those hours are needed. Measured on July PCR: TBMPCR7 was handed
+#   707 h -- ample in total -- and still finished with 96 h idle while its own
+#   anchor GT was 1,539 tyres short. 20 of its 27 idle gaps were individually
+#   large enough for a legal run; they were simply in days 2-29 while every
+#   unfed GT 1513 seat sat at day 1 07:00 or day 30.
+#
+#   Hours adequate in TOTAL and useless in POSITION. That is the defect.
+#
+# WHAT CHANGES
+#   Once L5 has run, every GT has real cure seats with real timestamps. The
+#   allocation can then rank by CURE DEADLINE -- a GT whose first seat is on day
+#   2 must claim machine hours before one whose first seat is on day 20, however
+#   large the latter is. That is the term the pre-L5 version structurally could
+#   not have.
+#
+# FULL PRIORITY ORDER (the plant's, now all of it)
+#   1 hard feasibility        -- only allowable (GT, machine) pairs are candidates
+#   2 GT scarcity / stranding -- fewest eligible machines claims first
+#   3 same rim                -- same-size changeover
+#   4 cure deadline           -- earliest first-seat wins            <- NEW
+#   5 largest shortfall       -- scarce hours buy the most volume
+#   6 same GT                 -- whole-GT allocation keeps runs intact
+#   7 sister / cluster        -- ranked only INSIDE the rim
+#   8 lowest changeover       -- rim continuity against the machine's anchor
+#   9 load balance            -- the machine loop, narrow machines first
+#
+# It emits the SAME schema as `allocate()`, so L7 consumes it unchanged and
+# PLANNER_L4B_ALLOC=0 still disables the whole mechanism.
+def allocate_timed(month: str, run: str) -> tuple[pl.DataFrame, dict]:
+    import calendar
+    y, m = int(month[:4]), int(month[5:7])
+    cap_h = calendar.monthrange(y, m)[1] * 24.0 * UTIL_CAP
+
+    camp = pl.read_parquet(paths.RUNS / run / "cure_campaigns.parquet")
+    # time-positioned cure demand: what each GT actually needs, and by when
+    dl = (camp.group_by(["plant", "gt_code"])
+              .agg(pl.col("start_ts").min().alias("first_seat"),
+                   pl.col("qty").sum().alias("cure_qty")))
+    t0 = camp["start_ts"].min()
+    dead = {(r["plant"], r["gt_code"]):
+            (r["first_seat"] - t0).total_seconds() / 3600.0
+            for r in dl.iter_rows(named=True)}
+
+    cm = allowable.restrict(
+        pl.read_parquet(paths.wh_derived(f"cap_machine_{month}.parquet")),
+        label="cap_machine", quiet=True)
+    cm = allowable.restrict_rimlock(cm, label="cap_machine", quiet=True)
+    sz = (pl.read_parquet(paths.input_derived("gt_size.parquet"))
+          .select(["plant", "gt_code", "rim"]).unique(subset=["plant", "gt_code"]))
+    rim_of = {(r["plant"], r["gt_code"]): (r["rim"] or "?")
+              for r in sz.iter_rows(named=True)}
+    fam_of: dict[tuple, str] = {}
+    f = paths.input_derived("gt_sister_group.parquet")
+    if f.exists():
+        for r in pl.read_parquet(f).iter_rows(named=True):
+            fam_of[(r["plant"], r["gt_code"])] = str(r.get("sister_id") or "")
+    f = paths.input_derived("sku_con_cluster.parquet")
+    if f.exists():
+        for r in pl.read_parquet(f).iter_rows(named=True):
+            k = (r["plant"], r["gt_code"])
+            if not fam_of.get(k):
+                fam_of[k] = "cl" + str(r.get("con_cluster"))
+    PCT = plant_ct.get()
+
+    rows, summary = [], {}
+    for plant in ("PCR", "TBR"):
+        el = cm.filter(pl.col("plant") == plant)
+        cq = dl.filter(pl.col("plant") == plant)
+        if not el.height or not cq.height:
+            continue
+        elig: dict[str, list[str]] = {}
+        for r in el.iter_rows(named=True):
+            elig.setdefault(r["gt_code"], []).append(r["machine"])
+        machines = sorted(el["machine"].unique().to_list())
+
+        # requirement in HOURS, from the cure quantity L5 actually seated
+        need_h: dict[str, float] = {}
+        need_q: dict[str, float] = {}
+        for r in cq.iter_rows(named=True):
+            g, q = r["gt_code"], float(r["cure_qty"])
+            ms = elig.get(g, [])
+            if not ms:
+                continue
+            cts = [c for c in (PCT.build_ct_s(plant, g, mc) or 0.0 for mc in ms) if c]
+            cts = cts or [60.0]
+            need_h[g] = q * (sum(cts) / len(cts)) / 3600.0
+            need_q[g] = q
+
+        reach: dict[str, list[str]] = {mc: [] for mc in machines}
+        for g, ms in elig.items():
+            if g in need_h:
+                for mc in ms:
+                    reach[mc].append(g)
+        free = {mc: cap_h for mc in machines}
+        fams: dict[str, set] = {mc: set() for mc in machines}
+        left = dict(need_h)
+
+        for mc in sorted(machines, key=lambda x: (len(reach[x]), x)):
+            mine = [g for g in reach[mc] if left.get(g, 0.0) > 1e-9]
+            if not mine:
+                continue
+            # anchor = earliest-deadline among this machine's largest work, so a
+            # narrow machine anchors on what it must feed FIRST, not merely on
+            # what is biggest.
+            mine.sort(key=lambda g: (dead.get((plant, g), 1e9), -left[g]))
+            anchor = mine[0]
+            a_rim = rim_of.get((plant, anchor), "?")
+            a_fam = fam_of.get((plant, anchor), "")
+
+            def _key(g, _a=anchor, _ar=a_rim, _af=a_fam):
+                r = rim_of.get((plant, g), "?")
+                fm = fam_of.get((plant, g), "")
+                return (0 if g == _a else 1,                       # 6 same GT
+                        len(elig.get(g, [])),                      # 2 scarcity
+                        0 if r == _ar else 1,                      # 3/8 same rim
+                        dead.get((plant, g), 1e9),                 # 4 deadline
+                        -left[g],                                  # 5 shortfall
+                        0 if (r == _ar and fm and fm == _af) else 1)  # 7 sister
+            for g in sorted(mine, key=_key):
+                if free[mc] <= 1e-9:
+                    break
+                take = min(left[g], free[mc])
+                if take <= 1e-9:
+                    continue
+                free[mc] -= take
+                left[g] -= take
+                fams[mc].add(rim_of.get((plant, g), "?"))
+                rows.append({"plant": plant, "gt_code": g, "machine": mc,
+                             "family": rim_of.get((plant, g), "?"),
+                             "alloc_h": round(take, 3),
+                             "alloc_qty": round(need_q[g] * take / need_h[g], 1)
+                             if need_h[g] else 0.0})
+
+        unplaced = sum(v for v in left.values() if v > 1e-9)
+        fpm = [len(v) for mc, v in fams.items() if cap_h - free[mc] > 1e-9]
+        summary[plant] = {
+            "machines_used": len(fpm),
+            "families_per_machine_mean": round(sum(fpm) / max(len(fpm), 1), 2),
+            "families_per_machine_max": max(fpm) if fpm else 0,
+            "unplaced_h": round(unplaced, 1),
+            "deadline_span_h": round(max(dead.values()) if dead else 0.0, 1),
+        }
+    return pl.DataFrame(rows), summary
+
+if __name__ == "__main__":
+    main()

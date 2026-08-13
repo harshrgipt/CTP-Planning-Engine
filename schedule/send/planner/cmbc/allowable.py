@@ -187,3 +187,81 @@ def restrict_rimlock(df: pl.DataFrame, *, label: str = "cap_machine",
         print(f"  [rimlock] {label}: {df.height} -> {out.height} rows "
               f"({df.height - out.height} dropped by the machine rim lock)")
     return out
+
+
+# ==========================================================================
+# RIM SET -- the JK-plant formulation of the inch lock
+# ==========================================================================
+# `machine_rim_lock` gives each machine ONE rim. Enforced hard it cost 14 pt of
+# PCR fulfilment and caused 87 % of August's infeasible hours, because 8 GTs got
+# zero eligible machines (see the note above).
+#
+# The JK B2C scheduler (`bc (1).md` section 4.5) uses a different shape and runs
+# it HARD in production: a per-machine SET of the rims that machine actually ran,
+# admitted at >= 2 % of its volume and capped at 3. On their plant that yields 27
+# single-rim (FIXED) and 12 multi-rim (FLEXIBLE) machines, and it nets positive
+# (June +7.7k / July +25.3k, August -6k). Their rule for the boundary is worth
+# copying verbatim: "historically-evidenced +3 jumps are legal; an inch never run
+# is not" -- evidence, not a band.
+#
+# Derived here from `machine_gt_share.parquet` (12-month share per GT x machine)
+# crossed with `gt_size`. On our plant it gives PCR 6 FIXED / 5 FLEXIBLE and
+# TBR 7 FIXED / 2 FLEXIBLE.
+#
+# This is strictly WIDER than `machine_rim_lock` -- a machine keeps every rim it
+# genuinely ran, not just its modal one -- so it is a different experiment, not a
+# retry of the one that failed. PLANNER_STRICT_RIMSET=1 to enable.
+_RIMSET_MIN_SHARE = float(os.environ.get("PLANNER_RIMSET_MIN_SHARE", "0.02"))
+_RIMSET_MAX = int(os.environ.get("PLANNER_RIMSET_MAX", "3"))
+
+
+def rim_sets() -> dict[tuple, set]:
+    """(plant, machine) -> the set of rims that machine genuinely ran."""
+    f = paths.input_derived("machine_gt_share.parquet")
+    if not f.exists():
+        return {}
+    sh = pl.read_parquet(f)
+    sz = (pl.read_parquet(paths.input_derived("gt_size.parquet"))
+          .select(["plant", "gt_code", "rim"]).unique(subset=["plant", "gt_code"]))
+    j = sh.join(sz, on=["plant", "gt_code"], how="left").drop_nulls("rim")
+    m = (j.group_by(["plant", "machine", "rim"])
+           .agg(pl.col("share_pct").sum().alias("w"))
+           .with_columns((pl.col("w") / pl.col("w").sum()
+                          .over(["plant", "machine"])).alias("frac"))
+           .filter(pl.col("frac") >= _RIMSET_MIN_SHARE)
+           .sort(["plant", "machine", "frac"], descending=[False, False, True]))
+    out: dict[tuple, set] = {}
+    for r in m.iter_rows(named=True):
+        k = (r["plant"], r["machine"])
+        s = out.setdefault(k, set())
+        if len(s) < _RIMSET_MAX:
+            s.add(r["rim"])
+    return out
+
+
+def restrict_rimset(df: pl.DataFrame, *, label: str = "cap_machine",
+                    quiet: bool = False) -> pl.DataFrame:
+    """Keep (gt, machine) only where the GT's rim is in the machine's rim SET.
+
+    Untouched: GTs with no rim, and machines with no share history.
+    """
+    if os.environ.get("PLANNER_STRICT_RIMSET", "0") == "0":
+        return df
+    rs = rim_sets()
+    if not rs:
+        return df
+    sz = (pl.read_parquet(paths.input_derived("gt_size.parquet"))
+          .select(["plant", "gt_code", "rim"]).unique(subset=["plant", "gt_code"]))
+    j = df.join(sz, on=["plant", "gt_code"], how="left")
+    keep = [
+        (r["rim"] is None) or ((r["plant"], r["machine"]) not in rs)
+        or (r["rim"] in rs[(r["plant"], r["machine"])])
+        for r in j.iter_rows(named=True)
+    ]
+    out = j.filter(pl.Series(keep)).drop("rim")
+    if not quiet:
+        print(f"  [rimset] {label}: {df.height} -> {out.height} rows "
+              f"({df.height - out.height} dropped by the machine rim SET; "
+              f"{sum(1 for v in rs.values() if len(v) == 1)} FIXED / "
+              f"{sum(1 for v in rs.values() if len(v) > 1)} FLEXIBLE machines)")
+    return out

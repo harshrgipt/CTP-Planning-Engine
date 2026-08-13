@@ -203,6 +203,7 @@ This project writes its mistakes down with the measurement that found each one. 
 | [PARTITION_AND_CHANGEOVER.md](schedule/send/PARTITION_AND_CHANGEOVER.md) | **the defect ledger — read first, every time.** §1 measurement errors · §2 the partition · §4b–4t measured-and-rejected experiments · §6 a 36-item do-not-repeat list · §8 single source of truth for every cap |
 | [EXPERT_AUDIT.md](schedule/send/EXPERT_AUDIT.md) | independent audit; corrects four documented-but-wrong claims and names the four failure modes that produced them — **read before MEMORY.md** |
 | [MEMORY.md](schedule/send/MEMORY.md) | engineering log, data lineage, §10d measurement ledger, §12 do-not list |
+| [SESSION_LOG_2026-08-12.md](schedule/send/SESSION_LOG_2026-08-12.md) | **everything tested 2026-08-11/12 with the number that decided it** — 8 of 9 scheduler changes measured negative, every win was a data fix; read before proposing a scheduling change |
 | [BUSINESS_RULES.md](schedule/send/BUSINESS_RULES.md) | the 46 numbered plant rules (B/P/C/S/G/E) with per-rule implementation status — check before changing behaviour, update the status column when you do |
 
 ## Deliberate non-goals — do not "fix" these

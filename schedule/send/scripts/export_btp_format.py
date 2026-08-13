@@ -220,7 +220,10 @@ def _assign_sku(df: pl.DataFrame, shares: dict, order_cols: list[str],
             code = max(need, key=lambda k: (need[k], k)) if need else gt
             need[code] = need.get(code, 0) - r[qty_col]
             out.append({**r, "SKUCode": code})
-    return pl.DataFrame(out).sort("_ix").drop("_ix")
+    # Some GT groups only introduce a string-valued audit column after the
+    # first 100 rows.  Polars' bounded schema inference then guesses a numeric
+    # type and the August export fails when that later value is appended.
+    return pl.DataFrame(out, infer_schema_length=None).sort("_ix").drop("_ix")
 
 
 def _write(path: Path, sheets: list[tuple[str, str | None, list[str], list[list]]]) -> None:
@@ -475,7 +478,11 @@ def main() -> int:
                                 r["prev_gt"], r["gt_code"], co_t, round(co_m, 1),
                                 int(r["day"]), "DONE"])
             ss_rows.append({**r, "CO_Mins": co_m, "CO_Type": co_t})
-        ssb = pl.DataFrame(ss_rows) if ss_rows else bb
+        # CO_Type is null on most rows and a string only at transitions; infer
+        # over the complete list so a late first transition cannot be typed as
+        # numeric and abort the export.
+        ssb = (pl.DataFrame(ss_rows, infer_schema_length=None)
+               if ss_rows else bb)
         ssx = _assign_sku(ssb, shares, ["day", "shift", "machine", "start_ts"])
         # reconcile
         _tgt = _gt_rounded_total(ssb)

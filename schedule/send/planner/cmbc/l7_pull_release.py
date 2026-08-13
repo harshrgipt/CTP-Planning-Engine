@@ -340,6 +340,9 @@ FULL_AVAIL_LADDER = os.environ.get(
 
 # Targeted LNS repair when a floor-sized run cannot find a contiguous hole.
 MAKEROOM = os.environ.get("PLANNER_L7_MAKEROOM", "1") != "0"
+# C -- pool same-GT sub-floor remainders inside one R5 window. Satisfies
+# B12 by MERGING to a legal run; never places anything sub-floor.
+POOL_TAILS = os.environ.get("PLANNER_POOL_TAILS", "0") != "0"
 # How many insertion points per machine `_make_room` may try, latest first.
 # MEASURED: 1 is the maximum. 6 leaves July identical (113/75 rescues) and costs
 # August PCR 148 -> 129, because every slot earlier than the latest one puts the
@@ -370,6 +373,22 @@ if DIAG and os.environ.get("PLANNER_DIAG_SHELF_H"):
 # Never build a GT outside its rim's locked machines. Turns the rim lock from a
 # priced preference into a constraint, so the WIP cap cannot break it.
 HARD_LOCK = os.environ.get("PLANNER_HARD_LOCK", "1") != "0"
+
+# Last-resort use of the plant's APPROVED allowable matrix.  HARD_LOCK is a
+# sequencing preference mined from historical rim purity; it is not a plant
+# prohibition.  Previously, when every home/rim-locked window failed, the run
+# was starved even if another machine explicitly approved for that GT had a
+# legal pre-deadline window.  July's clearest case is GT 1482 UHL: PCR3/PCR4/PCR7
+# are approved, PCR4 is its home, and PCR3/PCR7 retain idle time while 2,419
+# tyres go unfed.
+#
+# This pass is deliberately LAST: home/rim placement and make-room are tried
+# first, so normal work stays size-coherent.  `_place` still enforces reserved
+# setup, the strict lot floor, R5, the WIP rail, cadence and machine overlap.
+# Its candidates come from `_cand`, which has already been restricted by the
+# plant allowable matrix.  Matched July/August runs both recovered fed volume,
+# so this is now the default; set the flag to 0 only to reproduce the control.
+ALLOWABLE_RESCUE = os.environ.get("PLANNER_ALLOWABLE_RESCUE", "1") != "0"
 
 # ---- RIM PRIORITY: the inch lock as a PRIORITY with sequential campaigns ----
 #
@@ -739,6 +758,7 @@ def main() -> None:
     cm = allowable.restrict(pl.read_parquet(D / f"cap_machine_{a.month}.parquet"),
                             label=f"cap_machine_{a.month}")
     cm = allowable.restrict_rimlock(cm, label=f"cap_machine_{a.month}")
+    cm = allowable.restrict_rimset(cm, label=f"cap_machine_{a.month}")
     grp = pl.read_parquet(D / f"cap_ttl_groups_{a.month}.parquet")
     tt = pl.read_parquet(paths.INPUT_DERIVED / "tt_tl.parquet")
     # Rim per GT, for size-aware machine selection (R6/R7). The plant's
@@ -887,11 +907,46 @@ def main() -> None:
     # scarcity (fewest eligible machines, then largest volume) gives the GTs with
     # no alternative first claim; flexible GTs adapt around them.
     # Time order is kept as the final tiebreak so the result stays deterministic.
+    # ---- 12-MONTH HISTORICAL MACHINE SHARE -- ORDERING ONLY ---------------
+    # `machine_gt_share.parquet` is the plant's own running split per GT, e.g.
+    # 98 / 1 / 1. The GT should land ~98 % on its dominant machine, but must
+    # SPILL the instant that machine has no legal pre-deadline window: waiting
+    # starves a press, and a press-hour is gone for good while an early tyre only
+    # ages (72 h of shelf life to spend).
+    #
+    # So the share SORTS the candidate list and does nothing else. It cannot add
+    # a machine (candidates are already allowable-filtered, and 41 share rows
+    # naming a forbidden machine are ignored) and it cannot block one -- `_place`
+    # walks this list and takes the first machine with a legal window, so
+    # fallthrough to the 1 % machines is immediate.
+    #
+    # Deliberately weaker than `machine_rim_lock`, which was tried as a HARD
+    # constraint and cost 14 pt of PCR fulfilment by stranding 8 GTs outright.
+    _share: dict[tuple, float] = {}
+    _sf = paths.INPUT_DERIVED / "machine_gt_share.parquet"
+    # SHIPS AT 0 -- MEASURED NEGATIVE. July PCR 95.3 -> 94.9 pt, same-size
+    # 82.3 -> 79.6, weighted CO 78.7 -> 84.2, unfed +1,866. The candidate list
+    # is already ordered by rim lock and the L4b allocation, both of which know
+    # THIS month's capacity; last year's split overwrites that and a GT's
+    # historically dominant machine is often not its rim-consistent one.
+    # PCR already tracks history to within 1.8 pt WITHOUT this (82.0 % achieved
+    # against 83.9 % historical), so it buys 1.6 pt of concordance for 0.4 pt
+    # of fulfilment. Set PLANNER_MACHINE_SHARE=1 to re-measure.
+    if _sf.exists() and os.environ.get("PLANNER_MACHINE_SHARE", "0") != "0":
+        for _r in pl.read_parquet(_sf).iter_rows(named=True):
+            _share[(_r["plant"], _r["gt_code"], _r["machine"])] = \
+                float(_r["share_pct"])
+        print(f"  [share] {len(_share)} (GT, machine) historical shares loaded "
+              f"-- ordering preference, never a constraint")
+
     def _cand(p: str, gt: str) -> list:
-        """Eligible machines for a GT, inside its TT/TL group where B16 applies."""
+        """Eligible machines for a GT, inside its TT/TL group where B16 applies,
+        ordered by 12-month historical share (highest first)."""
         e = elig.get((p, gt), [])
         if p == "TBR" and gt_tag.get(gt):
             e = [x for x in e if group_of.get(x) == gt_tag[gt]] or e
+        if _share:
+            e = sorted(e, key=lambda m: (-_share.get((p, gt, m), 0.0), m))
         return e
 
     def _n_elig(p: str, gt: str) -> int:
@@ -900,8 +955,35 @@ def main() -> None:
     camp = camp.with_columns(
         pl.struct(["plant", "gt_code"]).map_elements(
             lambda r: _n_elig(r["plant"], r["gt_code"]),
-            return_dtype=pl.Int64).alias("_scarcity")).sort(
-        ["plant", "_scarcity", "start_ts", "gt_code", "press"])
+            return_dtype=pl.Int64).alias("_scarcity"))
+
+    # ---- FIRST-72 h PRIORITY -------------------------------------------
+    # The queue is scarcity-first: a GT with 1 eligible machine claims before one
+    # with 5, which is right for the month as a whole. But it means a
+    # single-machine GT whose seat is on day 20 is released BEFORE a 5-machine GT
+    # whose press is waiting at hour 0 -- and a press-hour lost on day 1 is gone,
+    # while the day-20 seat still has three weeks of slack.
+    #
+    # Measured: at t0 building can only reach 9 GTs in the first two hours while
+    # 30 GTs' presses are seated. Which 9 it picks is decided HERE.
+    #
+    # So campaigns whose cure seat falls inside the opening window are released
+    # first, ordered by seat time then scarcity; everything after the window keeps
+    # the existing scarcity order untouched. This is a PRIORITY change only -- no
+    # floor moves, no campaign is reseated, and the rest of July is unchanged.
+    _d1h = float(os.environ.get("PLANNER_D1_PRIORITY_H", "72"))
+    if _d1h > 0:
+        _t0c = camp["start_ts"].min()
+        camp = camp.with_columns(
+            ((pl.col("start_ts") - _t0c).dt.total_hours() < _d1h)
+            .cast(pl.Int8).alias("_early"))
+        camp = camp.sort(["plant", pl.col("_early") * -1, "start_ts",
+                          "_scarcity", "gt_code", "press"])
+        _ne = int(camp["_early"].sum())
+        print(f"  [d1-priority] {_ne} campaigns seated inside the first "
+              f"{_d1h:.0f} h released before the rest")
+    else:
+        camp = camp.sort(["plant", "_scarcity", "start_ts", "gt_code", "press"])
 
     # ---- HORIZON MACHINE ASSIGNMENT -- the RUN becomes an object --------
     # One machine per GT for the WHOLE horizon, a second only when the first is
@@ -1703,8 +1785,13 @@ def main() -> None:
         th = CONFIG.thresholds
         i_target = 0.5 * (th.gt_wip_min.get(p, 0) + th.gt_wip_max.get(p, 0))
         tau_cost = rsum * tau[p]
-        if LOT_INTERVAL_H > 0:
-            interval[p], basis = LOT_INTERVAL_H, "env"
+        # A plant-specific override permits TBR campaign consolidation without
+        # perturbing PCR's independently calibrated timing.  The shared value
+        # remains the fallback for backward compatibility.
+        _plant_interval = float(os.environ.get(
+            f"PLANNER_LOT_INTERVAL_{p}", str(LOT_INTERVAL_H)))
+        if _plant_interval > 0:
+            interval[p], basis = _plant_interval, "env"
         elif rsum > 1e-9 and i_target > 0:
             t_star = 2.0 * (i_target / rsum - tau[p])
             interval[p] = max(t_star, 0.0)
@@ -2460,6 +2547,7 @@ def main() -> None:
     for _i, (t_due, sc, p, gt, cand, grp) in enumerate(jobs):
         heapq.heappush(heap, (_hkey(t_due, gt, p), sc, _i, p, gt, cand, grp))
     _seq = len(jobs)
+    _pool_hold: dict = {}          # C: sub-floor remainders held for pooling
     while heap:
         t_due, sc, _i, p, gt, cand, grp = heapq.heappop(heap)
         # THREE PASSES, and the order is the whole point.
@@ -2512,6 +2600,17 @@ def main() -> None:
         # the locked machines only -- this opens space, it never widens the lock.
         if MAKEROOM and _make_room(p, gt, _lk, grp):
             continue
+        # LAST-RESORT APPROVED-MATRIX RESCUE.  A historical rim lock is a
+        # preference, not a legal ban.  Only machines that `_cand` admitted from
+        # the plant matrix can enter `_extra`; all physical/time gates remain in
+        # `_place`.  Trying the extras separately also means a flexible machine
+        # cannot displace a feasible home/rim placement above.
+        _extra = [m for m in cand if m not in set(_lk)]
+        if ALLOWABLE_RESCUE and _extra:
+            if (_place(p, gt, _extra, grp, EARLY_CAP_H)
+                    or _place(p, gt, _extra, grp, float("inf"))
+                    or (MAKEROOM and _make_room(p, gt, _extra, grp))):
+                continue
         # SPLIT AT THE FLOOR ON A PLANT-CALIBRATED BUDGET (B12).
         # Split-before-starve rescues volume, but every halving can produce a run
         # below min_lot. The plant does that itself 14 % (PCR) / 31 % (TBR) of the
@@ -2649,7 +2748,12 @@ def main() -> None:
             _diag_last["r5_n_machines_fit"] = _nfit5
             _diag_rows.append({
                 "plant": p, "gt_code": gt, "qty": float(_gq),
-                "n_slices": len(grp), "t_due": t_due,
+                "n_slices": len(grp),
+                # `t_due` on the heap is the composite ordering key returned by
+                # _hkey, not a timestamp.  Record the actual cure window so the
+                # failed placement can be attributed to the month boundary.
+                "cure_first": grp[0]["t_cure"],
+                "cure_last": grp[-1]["t_cure"],
                 "floor": float(floor_units.get(p, 0)),
                 "n_cand": len(cand), "n_lock": len(_lk),
                 "splittable": bool(len(grp) > 1 and not _breach),
@@ -2676,11 +2780,52 @@ def main() -> None:
             # Named separately so the price of the strict rule is never mixed in
             # with genuine capacity starvation.
             _rsn = "below min_lot (strict B12)"
+        # ---- C: HOLD SUB-FLOOR REMAINDERS FOR POOLING --------------------
+        # A group rejected for being under the B12 floor is not necessarily
+        # unbuildable: several such remainders of the SAME GT often sit within
+        # one shelf-life window, and pooled they CLEAR the floor. Measured July:
+        # 163 tyres on PCR, 719 on TBR are poolable this way; the other 2,656 have
+        # seats more than 72 h apart and no pooling can reach them.
+        #
+        # This SATISFIES B12 rather than relaxing it -- the merged run is a legal
+        # run. Nothing sub-floor is ever placed.
+        if POOL_TAILS and "min_lot" in _rsn:
+            _pool_hold.setdefault((p, gt), []).append((grp, cand))
+            continue
         for _d in grp:
             starved.append({"plant": p, "gt_code": gt,
                             "press": _d["press"], "qty": _d["qty"],
                             "reason": _rsn})
 
+    # ---- C: THE POOLING PASS -------------------------------------------
+    if POOL_TAILS and _pool_hold:
+        _pooled_ok = _pooled_q = 0
+        for (p, gt), items in sorted(_pool_hold.items()):
+            _fl = float(floor_units.get(p, 0))
+            _all = [d for grp, _c in items for d in grp]
+            _all.sort(key=lambda d: d["t_cure"])
+            _q = sum(d["qty"] for d in _all)
+            _span = ((_all[-1]["t_cure"] - _all[0]["t_cure"]).total_seconds() / 3600
+                     if len(_all) > 1 else 0.0)
+            # one run can only feed seats inside ONE shelf-life window
+            if _q >= _fl and _span <= GT_SHELF_LIFE_H:
+                _cand = items[0][1]
+                if (_place(p, gt, _cand, _all, EARLY_CAP_H)
+                        or _place(p, gt, _cand, _all, float("inf"))):
+                    _pooled_ok += 1
+                    _pooled_q += _q
+                    continue
+            for grp, _c in items:
+                for _d in grp:
+                    starved.append({"plant": p, "gt_code": gt,
+                                    "press": _d["press"], "qty": _d["qty"],
+                                    "reason": "would breach min_lot"})
+        if _pooled_ok:
+            print(f"  POOL-TAILS: {_pooled_ok} same-GT remainder groups merged "
+                  f"into legal runs, {_pooled_q:,.0f} tyres recovered "
+                  f"(floor never breached)")
+
+    _ = _pool_hold
     for _m, _rs in placed.items():
         for _r in _rs:
             slices.extend(_rows_of(_r))
@@ -2724,7 +2869,13 @@ def main() -> None:
     bs.write_parquet(run / "build_schedule.parquet")
     st_df.write_parquet(run / "build_starved.parquet")
     if DIAG and _diag_rows:
-        pl.DataFrame(_diag_rows).write_parquet(run / "l7_place_diag.parquet")
+        # Diagnostic counters are populated incrementally, so a sparse field
+        # can first appear as a numeric sentinel and later as text.  Coercion is
+        # acceptable here—the file is audit evidence, not a planning input—and
+        # prevents the diagnostic mode itself from aborting a valid plan.
+        pl.DataFrame(_diag_rows, strict=False,
+                     infer_schema_length=None).write_parquet(
+                         run / "l7_place_diag.parquet")
     # NEVER SILENT (§12). A rim that left its lock says so, with how much.
     if spill_to:
         print("\n  RIM SPILL USED")

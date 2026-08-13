@@ -64,7 +64,8 @@ def _scan(f: Path, plant: str) -> list[dict]:
     if not all(k in ix for k in need):
         raise SystemExit(f"{f.name}: expected columns {need}, got {hdr}")
     agg: dict[tuple, dict] = defaultdict(
-        lambda: {"tyres": 0, "first": None, "last": None, "recipes": set()})
+        lambda: {"tyres": 0, "first": None, "last": None, "recipes": set(),
+                 "rc_count": {}})
     for r in it:
         w, mo, ts = r[ix["wcID"]], r[ix["mouldNo"]], r[ix["dtandTime"]]
         if w is None or not mo:
@@ -78,10 +79,13 @@ def _scan(f: Path, plant: str) -> list[dict]:
         rc = r[ix["recipeID"]] if "recipeID" in ix else None
         if rc is not None:
             a["recipes"].add(str(rc))
+            a["rc_count"][str(rc).strip()] = a["rc_count"].get(str(rc).strip(), 0) + 1
     wb.close()
     return [{"plant": p, "press": pr, "mould_set": ms, "tyres": v["tyres"],
              "first_ts": v["first"], "last_ts": v["last"],
-             "n_recipes": len(v["recipes"])}
+             "n_recipes": len(v["recipes"]),
+             "modal_recipe": (max(v["rc_count"].items(), key=lambda x: x[1])[0]
+                              if v["rc_count"] else None)}
             for (p, pr, ms), v in agg.items()]
 
 
@@ -161,6 +165,27 @@ def run(month: str, pcr: Path | None, tbr: Path | None,
         if ts.height:
             print(f"         observed timestamps {ts['first_ts'].min()} .. "
                   f"{ts['last_ts'].max()}   <- NOT {month}; month is from the filename")
+    # ---- RESOLVE THE PRESS'S CURRENT GT --------------------------------
+    # `mouldNo` ("HM07#HM24") has ZERO string overlap with the engine's
+    # mould_set ("G::PCR::GT 1503 NEO MSIL") -- the namespace trap again. The
+    # bridge is recipeID -> gt_sku_master.recipe_id -> gt_code, which IS the
+    # engine's planning key. This is what lets L5 know which GT each press was
+    # already running at month start, so it can CONTINUE it instead of paying a
+    # mould change and waiting for fresh supply.
+    gsm = pl.read_parquet(paths.wh_derived("gt_sku_master.parquet"))
+    r2g = {str(r["recipe_id"]).strip(): r["gt_code"]
+           for r in gsm.iter_rows(named=True) if r.get("recipe_id") is not None}
+    df = df.with_columns(
+        pl.col("modal_recipe").map_elements(lambda x: r2g.get(x),
+                                            return_dtype=pl.Utf8).alias("current_gt"))
+    cur = df.filter(pl.col("is_current"))
+    res = cur.filter(pl.col("current_gt").is_not_null())
+    print(f"  press -> current GT resolved: {res.height} of {cur.height} presses "
+          f"({100*res.height/max(cur.height,1):.0f} %) via recipeID")
+    for p, g in res.group_by("plant"):
+        print(f"     {p[0]}: {g['press'].n_unique()} presses · "
+              f"{g['current_gt'].n_unique()} distinct GTs")
+
     if write:
         f = paths.INPUT_DERIVED / f"running_moulds_{month}.parquet"
         df.write_parquet(f)
