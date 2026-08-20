@@ -40,11 +40,14 @@ BELOW-MINIMUM DEMAND IS ROUTED, NOT DROPPED (B12)
 from __future__ import annotations
 
 import argparse
+import calendar as _cal
 import json
+import os
 from pathlib import Path
 
 import polars as pl
 
+from planner.cmbc import _stamp
 from planner.config import CONFIG, GT_SHELF_LIFE_H
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -56,14 +59,15 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 # master. Point a run at it with PLANNER_OPENING_GT -- a bare filename resolves
 # inside masters/opening_gt, an absolute path is taken as given.
 def _opening_gt_path(root, month):
-    import os
-    from pathlib import Path
-    d = root / "masters" / "opening_gt"
-    ov = os.environ.get("PLANNER_OPENING_GT", "").strip()
-    if not ov:
-        return d / f"opening_gt_{month}.parquet"
-    p = Path(ov)
-    return p if p.is_absolute() else d / ov
+    """Thin shim over `paths.opening_gt`. There were SIX character-identical
+    re-implementations of this resolver (L4, L5, L7, plus inline reads in
+    export_btp_format and export_shift_schedule, plus paths.py itself), against
+    CLAUDE.md's "all input lookups go through planner/paths.py". They agreed;
+    the doctrine is that more than one site is the defect, because the day they
+    stop agreeing nothing detects it. `root` is accepted and ignored so the call
+    sites did not have to change."""
+    from planner import paths as _paths
+    return _paths.opening_gt(month)
 
 D = ROOT / "warehouse" / "derived"
 PARAMS = ROOT / "warehouse" / "params"
@@ -138,9 +142,48 @@ def main() -> None:
         nf = ROOT / "masters" / "demand" / f"demand_{nxt}.parquet"
         if nf.exists():
             nd = pl.read_parquet(nf)
+            # UNPHASED ORDER BOOK -> PRO-RATE, AND SAY SO.
+            # `demand_2026-08.parquet` puts ALL 528,165 tyres on day 31 -- it is
+            # an order book, not a phased schedule. The `day <= N` filter then
+            # returns ZERO rows and the success message below prints
+            # "+3 d (0 tyres) appended", which is a no-op reported as a win.
+            # That is why this flag has never done anything.
+            # If the file carries a single distinct day, treat it as a monthly
+            # total and take N days' worth pro-rata. Never silent: the print
+            # names which branch ran.
+            _prorata = False
             if "day" in nd.columns:
-                nd = nd.filter(pl.col("day") <= a.lookahead_days)
+                if nd["day"].n_unique() <= 1:
+                    _ny, _nm = int(nxt[:4]), int(nxt[5:7])
+                    _nd_days = _cal.monthrange(_ny, _nm)[1]
+                    if os.environ.get("PLANNER_LOOKAHEAD_PRORATA", "0") == "1":
+                        _k = a.lookahead_days / float(_nd_days)
+                        nd = nd.with_columns(
+                            (pl.col("qty") * _k).round(0).alias("qty")).filter(
+                            pl.col("qty") > 0)
+                        _prorata = True
+                    else:
+                        raise SystemExit(
+                            f"!! {nf.name} is an UNPHASED order book (all "
+                            f"{int(nd['qty'].sum()):,} tyres on one day). The "
+                            f"lookahead filter would return 0 rows and report "
+                            f"success. Either phase it by day, or set "
+                            f"PLANNER_LOOKAHEAD_PRORATA=1 to take "
+                            f"{a.lookahead_days}/{_nd_days} of the month.")
+                else:
+                    nd = nd.filter(pl.col("day") <= a.lookahead_days)
+            # Align dtypes before the concat: the two months' parquets carry
+            # `day`/`qty` at different widths (Int8 vs Int64) and diagonal concat
+            # will not coerce them.
+            for _c, _t in (("day", pl.Int64), ("qty", pl.Float64)):
+                if _c in nd.columns:
+                    nd = nd.with_columns(pl.col(_c).cast(_t))
+                if _c in dem.columns:
+                    dem = dem.with_columns(pl.col(_c).cast(_t))
             la_qty = int(nd["qty"].sum())
+            if _prorata:
+                print(f"  lookahead: {nf.name} is unphased -- PRO-RATED "
+                      f"{a.lookahead_days}/{_nd_days} of the month")
             dem = pl.concat([dem.with_columns(pl.lit(False).alias("_la")),
                              nd.with_columns(pl.lit(True).alias("_la"))],
                             how="diagonal")
@@ -157,8 +200,18 @@ def main() -> None:
               pl.col("sku").n_unique().alias("skus"),
               # A GT is lookahead-only if NONE of its rows belong to month M --
               # those must be excluded when scoring M.
-              (~pl.col("_la")).sum().alias("_in_month"))
-         .with_columns((pl.col("_in_month") == 0).alias("lookahead"))
+              (~pl.col("_la")).sum().alias("_in_month"),
+              # LOOKAHEAD IS A QUANTITY, NOT A GT PROPERTY.
+              # Tagging whole GTs (`_in_month == 0`) only catches GTs demanded
+              # SOLELY next month. A GT demanded in BOTH months keeps its
+              # next-month quantity inside `demand`, which silently inflates
+              # THIS month's denominator -- measured 2026-08-14: arming a 3-day
+              # lookahead read July PCR 96.2 % -> 89.8 % with 9,456 MORE tyres
+              # cured. The percentage fell because the denominator grew, not
+              # because the plan got worse.
+              pl.col("qty").filter(pl.col("_la")).sum().alias("demand_la"))
+         .with_columns((pl.col("_in_month") == 0).alias("lookahead"),
+                       pl.col("demand_la").fill_null(0.0))
          .drop("_in_month")
          .sort(["plant", "gt_code"]))
     use, exp = usable_opening(a.month)
@@ -179,17 +232,78 @@ def main() -> None:
         (pl.col("demand") - pl.col("fg_stock"))
         .clip(lower_bound=0).alias("net_cure"))
     r = r.with_columns(pl.col("plant").replace_strict(yld).alias("cure_yield"))
+    # TWO QUANTITIES, NOT ONE. THEY ARE NOT INTERCHANGEABLE.
+    #
+    #   cure_requirement  green tyres the PRESSES must consume        = ceil(net_cure / yield)
+    #   gross_build       green tyres BUILDING must make      = cure_requirement - from_stock
+    #
+    # Opening green stock changes WHO SUPPLIES a press cycle. It cannot change
+    # HOW MANY press cycles exist: to deliver `net_cure` good tyres the presses
+    # run `net_cure / yield` cycles whether the green tyre was built this month
+    # or was already on the floor. So it is subtracted from the BUILD quantity
+    # and from nothing else -- which is exactly what MEMORY.md records as the
+    # invariant from the last time this was got wrong: "It reduces what must be
+    # BUILT, never what must be CURED."
+    #
+    # `cure_requirement` DID NOT EXIST until 2026-08-18, so every cure consumer
+    # had to reach for `gross_build`, and L4.5 sized the CURE LOT from it
+    # (l45_lotsize.py `need = x["gross_build"]`). The fix above was therefore
+    # in place while its own invariant was violated one layer down. Measured
+    # cost -- cure cycles never planned, equal to `from_stock` to the tyre in
+    # all four cells:
+    #
+    #        cure_requirement   gross_build   never planned   from_stock
+    #   Jul PCR    398,459        393,639         4,820          4,820
+    #   Jul TBR     99,242         97,991         1,251          1,251
+    #   Aug PCR    427,949        423,473         4,476          4,476
+    #   Aug TBR    100,567         99,541         1,026          1,026
+    #
+    # That capped fulfilment below 100 % before any scheduling decision was
+    # taken: PCR 98.78 % (Jul) / 96.49 % (Aug), TBR 98.26 % / 98.08 %.
+    #
+    # RULE FOR CONSUMERS: if the quantity is fed to a press, compared against
+    # something fed to a press, or divided into press cycles, it is
+    # `cure_requirement`. If it is what a building machine must produce, it is
+    # `gross_build`. `qty_fed` counts opening stock, so anything divided by it
+    # is the former.
     r = r.with_columns(
-        ((pl.col("net_cure") / pl.col("cure_yield")).ceil()
-         - pl.col("from_stock")).clip(lower_bound=0).cast(pl.Int64)
-        .alias("gross_build"))
+        (pl.col("net_cure") / pl.col("cure_yield")).ceil().cast(pl.Int64)
+        .alias("cure_requirement"))
+    r = r.with_columns(
+        (pl.col("cure_requirement") - pl.col("from_stock"))
+        .clip(lower_bound=0).cast(pl.Int64).alias("gross_build"))
+    # Lookahead share of each, so L11 can SUBTRACT it from whichever denominator
+    # it is using rather than dropping whole GT rows.
+    _la_frac = pl.col("demand_la") / pl.col("demand").clip(lower_bound=1e-9)
+    r = r.with_columns(
+        (pl.col("gross_build") * _la_frac).alias("gross_build_la"),
+        (pl.col("cure_requirement") * _la_frac).alias("cure_requirement_la"))
     # B12: below the floor it is not worth a setup -- route, never drop
     r = r.with_columns(
         (pl.col("demand") < pl.col("plant").replace_strict(min_dem))
         .alias("residual"))
 
+    # F10: the two demand generators disagree on dtype (`make_demand` writes qty
+    # Float64, `ingest_orderbook_demand` Int64), which propagates here and makes
+    # `pl.concat` of two months raise. Pin the numeric columns so the artefact has
+    # one schema whatever produced its input.
+    r = r.with_columns([pl.col(c).cast(pl.Float64) for c in
+                        ("demand", "demand_la", "usable", "fg_stock",
+                         "from_stock", "net_cure", "cure_yield",
+                         "gross_build_la", "cure_requirement_la")
+                        if c in r.columns]
+                       + [pl.col(c).cast(pl.Int64) for c in
+                          ("gross_build", "cure_requirement") if c in r.columns])
+
     out = D / f"net_requirement_{a.month}.parquet"
     r.write_parquet(out)
+    # `lookahead_days` is a CLI ARG, not an env flag, so preflight cannot
+    # reconstruct it -- hashing it would make the stamp permanently mismatch.
+    # It is recorded for the reader but excluded from the hash; the env flag
+    # PLANNER_LOOKAHEAD_PRORATA (which any real lookahead run must set) is what
+    # the gate actually keys on. A lookahead run WITHOUT that flag raises in the
+    # unphased-order-book branch above, so the hole is closed on that side.
+    _stamp.write(out)
 
     print("=" * 92)
     print(f"L4  NET CURE REQUIREMENT  --  {a.month}   (R1, R5, R15, B12)")
@@ -230,22 +344,57 @@ def main() -> None:
                       f"({int(s['demand'].sum()):,} tyres)")
     print(f"  expired at epoch (>{GT_SHELF_LIFE_H:.0f} h): "
           f"{int(exp['expired'].sum()) if exp.height else 0} tyres")
+    # SURPLUS IS TWO DIFFERENT THINGS AND ONLY ONE OF THEM WAS COUNTED.
+    # `r` is a LEFT JOIN FROM DEMAND, so a GT with stock and no demand at all has
+    # no row in it and could never appear in a line explicitly labelled
+    # "(no demand)". August 2026: the line printed 27 tyres across 1 GT while
+    # 672 tyres across 9 GTs (PCR 432 / TBR 240) sat on the floor for GTs nobody
+    # ordered -- physical stock invisible to this layer, and L7 will find no
+    # campaign for it. July printed 0 and 0, which is why it never showed.
     surplus = r.filter(pl.col("usable") > pl.col("from_stock"))
     if surplus.height:
-        print(f"  surplus opening stock (no demand): "
+        print(f"  demanded GTs with stock above demand: "
               f"{int((surplus['usable'] - surplus['from_stock']).sum()):,} tyres "
               f"across {surplus.height} GTs")
+    _demanded = set(zip(r["plant"].to_list(), r["gt_code"].to_list()))
+    _nod = use.filter(~pl.struct(["plant", "gt_code"]).map_elements(
+        lambda x: (x["plant"], x["gt_code"]) in _demanded,
+        return_dtype=pl.Boolean)) if use.height else use
+    if _nod.height:
+        _by = _nod.group_by("plant").agg(pl.col("usable").sum())
+        print(f"  opening stock with NO DEMAND AT ALL: "
+              f"{int(_nod['usable'].sum()):,} tyres across {_nod.height} GTs ("
+              + ", ".join(f"{x['plant']} {int(x['usable']):,}"
+                          for x in _by.iter_rows(named=True)) + ")")
 
     # ---- reconcile against the L3 ceiling -------------------------------
     cf = D / f"l3_ceiling_{a.month}.parquet"
     if cf.exists():
         c = pl.read_parquet(cf)
-        print("\n  vs L3 ceiling")
+        # THE CEILING ITSELF IS OVERSTATED, and this layer cannot fix it.
+        # `_offline/l3_ceiling.py` sums each press's OWN p90 day. The chance of
+        # all 86 PCR presses hitting their 90th-percentile day at once is
+        # essentially nil -- a fleet p90 is far tighter than the sum of
+        # per-press p90s (per-press p90/p50 = 1.176). Rebuilding it needs the
+        # raw MES. Read `load` as an OPTIMISTIC bound: at 98 % the month is
+        # probably already over capacity.
+        print("\n  vs L3 ceiling   (ceiling = SUM of per-press p90 -- optimistic)")
         print(f"  {'plant':<6}{'plannable':>12}{'capacity/mo':>14}{'load':>8}")
         for x in c.iter_rows(named=True):
-            need = float(r.filter((pl.col("plant") == x["plant"])
-                                  & ~pl.col("residual"))["gross_build"].sum())
-            cap = x["max_feasible"] * 744 / 168.0
+            # A PRESS ceiling takes the PRESS quantity. `gross_build` is what
+            # building must make; the presses must run `cure_requirement` cycles
+            # whether the green tyre is new or came off the floor. Same F1 class
+            # as the L4.5 lot sizing, one report down.
+            _sub = r.filter((pl.col("plant") == x["plant"]) & ~pl.col("residual"))
+            need = float(_sub[("cure_requirement" if "cure_requirement"
+                               in _sub.columns else "gross_build")].sum())
+            # F3: 744 was hardcoded, so a 30-day month read as 31 and a 28-day
+            # month as 31 -- June PCR capacity was overstated by 14,073 tyres
+            # (3.3 %), February would be 10.7 % out. `l5_cure_master.py` derives
+            # the same conversion correctly from the calendar: one constant, two
+            # derivations, one of them month-blind. Fourth site of this class.
+            cap = x["max_feasible"] * (_cal.monthrange(
+                int(a.month[:4]), int(a.month[5:7]))[1] * 24) / 168.0
             print(f"  {x['plant']:<6}{need:>12,.0f}{cap:>14,.0f}"
                   f"{100*need/max(cap,1):>7.1f}%")
     print(f"\n  -> {out.name}")

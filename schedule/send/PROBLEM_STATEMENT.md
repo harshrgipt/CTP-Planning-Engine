@@ -83,6 +83,12 @@ Reporting rules, both learned from measurement errors that hid regressions:
 - **always report PCR and TBR separately** — a plant total that moved 1.85 pt
   once hid an 8.67 pt TBR regression;
 - **inventory is a stock held over time**, so time-weighted, never event-weighted;
+- **in-month is TAIL-SENSITIVE, so always report BUILT beside it.** A change
+  that raises in-month while BUILT falls is *relocating* output across the month
+  boundary, not creating it. A press-eligibility fix scored +3.4 pt of August
+  in-month while building 2,432 fewer tyres and was nearly shipped on that
+  strength; `scripts/arm_scorecard.py` now prints BUILT / in-month / tail /
+  total for every arm;
 - **every fulfilment figure must name its basis.** A sweep harness summed
   `qty_fed_in_month` — the *fed* column — and reported it as in-month for a whole
   session, inflating July by ~0.6 pt and reversing the sign of a PCR/TBR
@@ -94,8 +100,9 @@ Reporting rules, both learned from measurement errors that hid regressions:
 
 | | Jul PCR | Jul TBR | Aug PCR | Aug TBR |
 |---|---|---|---|---|
-| **fulfilment in-month** | **96.2 %** | **95.7 %** | **91.4 %** | **89.4 %** |
-| including carry-out tail | 97.1 % | 98.3 % | 96.5 % | 94.0 % |
+| **BUILT** (tyres the plan produces) | **96.7 %** | **97.7 %** | **95.7 %** | **93.5 %** |
+| **fulfilment in-month** (the KPI) | **96.2 %** | **95.7 %** | **91.4 %** | **89.4 %** |
+| including carry-out tail | 97.8 % | 97.7 % | 96.8 % | 93.0 % |
 | same-size share (plant 91.5 / 100) | 80.4 % | 100 % | 75.2 % | 100 % |
 | weighted CO min/machine-day (plant 74.0 / 35.6) | 78.7 | 33.6 | 99.8 | 21.8 |
 | changeovers/machine-day (plant 2.66 / 3.56) | 2.65 | 3.36 | 3.15 | 2.18 |

@@ -1,0 +1,46 @@
+{
+  "allowed_machine_matrix": {
+    "rows": 1373,
+    "sha1": "144a8e1d3283"
+  },
+  "demand@2026-07": {
+    "rows": 1724,
+    "sha1": "33156d7594dc"
+  },
+  "demand@2026-08": {
+    "rows": 116,
+    "sha1": "5fc06597f63f"
+  },
+  "gt_machine_partition@2026-07": {
+    "rows": 93,
+    "sha1": "8a47e109e27d"
+  },
+  "gt_machine_partition@2026-08": {
+    "rows": 96,
+    "sha1": "17b553f3aa62"
+  },
+  "gt_size": {
+    "rows": 583,
+    "sha1": "f1ad3ad32766"
+  },
+  "opening_gt@2026-07": {
+    "rows": 6117,
+    "sha1": "bf3bb757d5b0"
+  },
+  "opening_gt@2026-08": {
+    "rows": 6398,
+    "sha1": "88a737343bde"
+  },
+  "params": {
+    "rows": -1,
+    "sha1": "2e2832470ed0"
+  },
+  "pcr_inch_eligibility": {
+    "rows": 69,
+    "sha1": "e1cd35a1e4bd"
+  },
+  "tt_tl": {
+    "rows": 2325,
+    "sha1": "916b49dfcf38"
+  }
+}

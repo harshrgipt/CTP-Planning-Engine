@@ -40,6 +40,38 @@ COST -- state it, do not hide it
 
   `PLANNER_STRICT_ALLOWABLE=0` restores the old soft-penalty behaviour for a
   deliberate A/B. It ships at 1.
+
+THE MATRIX CONTRADICTS THE PLANT'S OWN MES. MEASURED 2026-08-13.
+  For July's six biggest PCR shortfalls, MES shows the plant built that GT on
+  5-11 machines while this matrix permits 1-2:
+
+      GT 2258 RAN HPE     plant used  8 machines · matrix allows 1 (M2)
+      GT 1513 XPC1 MSIL   plant used 11 machines · matrix allows 2
+      GT 1402 XPC TATA    plant used  5 machines · matrix allows 1 (M4)
+      GT 2568 HT2         plant used  8 machines · matrix allows 1 (M9)
+
+  Across every short GT: 99 % of July PCR's shortfall (12,154 of 12,295 tyres)
+  and 94 % of August's (15,401 of 16,301) sits on GTs where MES shows MORE
+  machines than the matrix allows -- MES p50 11 against matrix p50 2.
+
+  The plant reaches 100 % in July because it is not operating under this
+  constraint. Cost of enforcing it, measured on BUILT, both months, both plants:
+
+      Jul PCR  +4,216 BUILT (96.2 -> 97.1 %)     Jul TBR    +81 (95.7 -> 95.8 %)
+      Aug PCR  +1,787 BUILT (91.4 -> 91.7 %)     Aug TBR +4,703 (89.4 -> 94.0 %)
+
+  ~10,800 tyres over the two months, 0 L11 invariants lost, POSITIVE ON ALL
+  FOUR PLANT-MONTHS -- it passes the two-month gate outright. August TBR's
+  89.4 -> 94.0 is the v9 regression, restored.
+
+  IT STILL SHIPS HARD, BY INSTRUCTION, AND THAT IS THE RIGHT DEFAULT UNTIL THE
+  PLANT RULES. Two readings and only the plant can choose:
+    (a) the file is a PREFERENCE / home-machine list and the floor floats work
+        across machines when it needs to -- then this should be soft ordering;
+    (b) the file is authoritative and current, in which case the plant's own
+        July production VIOLATED it, and our plan is more compliant than what
+        the plant actually ran.
+  Do not flip this on the measurement alone. It is a plant rule, not a knob.
 """
 from __future__ import annotations
 

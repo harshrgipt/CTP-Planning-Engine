@@ -42,11 +42,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 
 import polars as pl
 
 from planner.cmbc import plant_ct
+from planner.cmbc import _stamp
 from planner.config import CONFIG, GT_SHELF_LIFE_H
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -106,11 +108,69 @@ def main() -> None:
     cav = pl.read_parquet(D / "l3_cavities.parquet")
     pmc = pl.read_parquet(D / "press_mould_change.parquet")
     min_lot = CONFIG.thresholds.min_lot_units
+    # Per-(plant, GT) daily demand curve straight from the order book.
+    _phase: dict = {}
+    _ph_tot: dict = {}
+    try:
+        _dm = pl.read_parquet(ROOT / "masters" / "demand" / f"demand_{a.month}.parquet")
+        if "day" in _dm.columns:
+            for _r in (_dm.group_by(["plant", "gt_code", "day"])
+                       .agg(pl.col("qty").sum()).sort(["plant", "gt_code", "day"])
+                       .iter_rows(named=True)):
+                _k = (_r["plant"], _r["gt_code"])
+                _phase.setdefault(_k, []).append((int(_r["day"]), float(_r["qty"])))
+                _ph_tot[_k] = _ph_tot.get(_k, 0.0) + float(_r["qty"])
+            print(f"  order-book phasing: {len(_phase)} GTs carry due dates")
+    except Exception as _e:                                     # noqa: BLE001
+        print(f"  order-book phasing unavailable ({_e}) -- lots get no deadline")
 
     # cure-campaign mean hours come from L0 (measured per month, then combined).
-    mean_camp_h = {p: float(P["campaign_bands"][p]["cure"]["hours_mean"])
+    # WHICH STATISTIC? The plant's cure-campaign distribution is right-skewed
+    # 2:1 -- PCR p50 85.33 h against mean 174.72, TBR p50 190.09 against
+    # 255.94. Sizing on the MEAN aims at the tail, not the typical campaign,
+    # and produces campaigns 2.0x (PCR) / 1.4x the plant p50: ours p50 169.2 h
+    # and 266.5 h, qty p50 1,170 against the plant's 495.
+    # Same defect class as tau* and min_lot (PARTITION section 1): a mined
+    # statistic adopted as a target without asking which moment of the
+    # distribution the plant actually operates at.
+    # PLANNER_L45_CAMP_STAT=p50 targets the median instead.
+    _cstat = os.environ.get("PLANNER_L45_CAMP_STAT", "mean")
+    CONC_FLOOR = float(os.environ.get("PLANNER_L45_CONC_FLOOR", "0"))
+    import calendar as _cal
+    HZ_H = _cal.monthrange(int(a.month[:4]), int(a.month[5:7]))[1] * 24.0
+    _ckey = "hours_p50" if _cstat == "p50" else "hours_mean"
+    mean_camp_h = {p: float(P["campaign_bands"][p]["cure"][_ckey])
                    for p in ["PCR", "TBR"]
-                   if "hours_mean" in P["campaign_bands"].get(p, {}).get("cure", {})}
+                   if _ckey in P["campaign_bands"].get(p, {}).get("cure", {})}
+    # ---- p50nz: THE ZERO-STRIPPED MEDIAN -----------------------------------
+    #
+    # THE BAND IS CONTAMINATED, and both raw statistics are wrong because of it.
+    # L0's cure-campaign detector counts single-cycle events as campaigns:
+    #   PCR deciles [0.0, 0.0, 0.55, 22.56, 59.45, 114.83, 191.49, ...]  30% ~zero
+    #   TBR deciles [0.0, 0.01, 41.78, 95.62, 154.15, 229.15, ...]       20% ~zero
+    # So `hours_mean` (174.7 / 255.9) is inflated by the long tail while
+    # `hours_p50` (85.3 / 190.1) is DEFLATED by the zeros. Neither describes a
+    # real campaign. Targeting p50 measured -0.2 pt on PCR for exactly this
+    # reason -- it was chasing an artefact, not the plant.
+    #
+    # Strip the zeros: if a fraction z of observations are ~0, the median of the
+    # REAL campaigns sits at percentile z + (1-z)/2 of the full distribution.
+    #   PCR z=30% -> p65 -> ~115 h        TBR z=20% -> p60 -> ~229 h
+    # Derived from the stored deciles, so it needs no MES re-mine. The proper
+    # fix is in L0's detector (exclude sub-cycle events before taking any
+    # statistic); this makes the corrected number usable in the meantime.
+    if _cstat == "p50nz":
+        for _p in ("PCR", "TBR"):
+            _d = P["campaign_bands"].get(_p, {}).get("cure", {}).get(
+                "hours_deciles") or []
+            if len(_d) < 2:
+                continue
+            _z = sum(1 for _x in _d if _x < 1.0) / len(_d)
+            _q = _z + (1.0 - _z) / 2.0
+            _i = min(len(_d) - 1, max(0, int(round(_q * len(_d))) - 1))
+            mean_camp_h[_p] = float(_d[_i])
+    print(f"  campaign-length target ({_cstat}): "
+          + "  ".join(f"{p} {mean_camp_h.get(p, 0):.1f}h" for p in ("PCR", "TBR")))
     # campaign-length SHAPE per line, used to give lots realistic variance
     shape_h = {p: [x for x in P["campaign_bands"][p]["cure"].get("hours_deciles", [])
                    if x > 0]
@@ -137,7 +197,15 @@ def main() -> None:
              for p in ["PCR", "TBR"]}
     mch_p = {p: float(pmc.filter(pl.col("plant") == p)["mould_change_min"].median())
              / 60.0 for p in ["PCR", "TBR"]}
-    PCT = plant_ct.get({q: float(P["press_availability"][q]["availability"])
+    # PRESS AVAILABILITY REMOVED, BOTH PLANTS. Plant instruction 2026-08-19.
+    # L5 dropped the mined MTBF/MTTR haircut (PCR 0.8897, TBR 0.8282) at the same
+    # instruction; this site was the SECOND reader and would have left L4.5
+    # sizing lots against a slower press than L5 seats them on -- the same limit
+    # written twice with two values, which is the duplicated-constant defect
+    # PARTITION section 1g records. `PLANNER_PRESS_AVAIL` overrides both plants
+    # here exactly as it does in L5, so the two layers can never diverge again.
+    _av45 = os.environ.get("PLANNER_PRESS_AVAIL", "")
+    PCT = plant_ct.get({q: (float(_av45) if _av45 else 1.0)
                         for q in ("PCR", "TBR")})
 
     print("=" * 92)
@@ -190,7 +258,16 @@ def main() -> None:
     rows = []
     for x in r.iter_rows(named=True):
         p, gt = x["plant"], x["gt_code"]
-        need = float(x["gross_build"])
+        # THE CURE LOT IS SIZED FROM THE CURE REQUIREMENT, NOT FROM gross_build.
+        # This layer sizes CURE lots (see the module docstring: "the cure lot;
+        # build slices have no minimum"), and `gross_build` is a BUILD quantity --
+        # it has already had opening green stock subtracted. Using it here planned
+        # `from_stock` fewer press cycles than the month needs, every month, on
+        # both plants: 4,820 / 1,251 (Jul PCR/TBR), 4,476 / 1,026 (Aug), equal to
+        # `from_stock` to the tyre. Opening stock decides WHO FEEDS a press cycle,
+        # never how many cycles exist. Fixed 2026-08-18 with the column L4 was
+        # missing; fall back only for a pre-2026-08-18 artefact.
+        need = float(x.get("cure_requirement", x["gross_build"]) or 0.0)
         if x["residual"] or need <= 0:
             rows.append({**{k: x[k] for k in ("plant", "gt_code", "mould_set")},
                          "need": need, "n_lots": 0, "lot_qty": 0.0,
@@ -234,6 +311,25 @@ def main() -> None:
         if not mean_h:
             raise SystemExit(f"L0 params carry no cure hours_mean for {p}")
         n = max(1, math.ceil((need / max(rate_h_1, 1e-9)) / mean_h))
+        # ---- CONCURRENCY IS CHOSEN, NOT INHERITED (PLANNER_L45_CONC_FLOOR) --
+        #
+        # `n` above is a LENGTH decision -- how many campaigns of ~mean_h hours
+        # this GT's press-hours make. Concurrency then falls out of it as a
+        # by-product, because a GT can never run on more presses at once than it
+        # has lots. Measured on GT 1513: 35 moulds, 44 eligible presses, the
+        # plant ran 21 CONCURRENTLY; we peak at 15 because the decomposition
+        # never produced enough lots to do better.
+        #
+        # The floor is arithmetic, not mined: a GT needs at least
+        #     k_min = ceil( need / (press rate x horizon hours) )
+        # presses running together to finish inside the month at all. Below that
+        # the campaign MUST spill past the boundary -- which is exactly the
+        # "plant completes its SKUs in-month, we exceed" symptom.
+        # CONC_FLOOR scales it, capped by the physical mould count (R3).
+        if CONC_FLOOR > 0.0:
+            _kmin = max(1, math.ceil(need / max(rate_h_1 * HZ_H, 1e-9)))
+            _kf = min(int(moulds), int(math.ceil(CONC_FLOOR * _kmin)))
+            n = max(n, _kf)
         # RESTORE VARIANCE. Splitting need into n EQUAL lots made every campaign
         # the same length -- PCR p50 172.3 == p90 174.9 == max 174.9, against a
         # plant spread of 153 -> 535 -> 744 h. Uniform blocks leave an unusable
@@ -269,15 +365,59 @@ def main() -> None:
             pol.append("split at 72 h ceiling")
         qty = float(int(round(qty)))          # whole tyres, never a fraction
         capped = qty > mx
+        # ---- PER-LOT DEADLINE, FROM THE ORDER BOOK ------------------------
+        #
+        # THE SIGNAL WE WERE THROWING AWAY. `demand_<M>.parquet` carries
+        # `due_date` and `day` per SKU line -- the only real timing information
+        # the plant gives us. Neither `net_requirement` nor `l45_lots` carried it
+        # forward, so by L5 the plan had NO deadlines at all: it sorted by -qty
+        # and placed at earliest-feasible, which produces a flat concurrency
+        # curve by construction.
+        #
+        # Verified 2026-08-14 -- the plant's "S-curve" is not a scheduling
+        # behaviour, it is its due dates:
+        #     GT 1513  plant day-21 cumulative 57.2%  |  57.2% DUE by day 21
+        #     GT 1503                          59.0%  |  59.0% DUE
+        #     GT 2476                          69.6%  |  69.6% DUE
+        #     GT1915   finishes day 21                |  last due day 26
+        # Exact match on every one. The plant simply builds to its order book.
+        #
+        # That is also why "mined statistic as a constraint" keeps recurring in
+        # this codebase: the real timing signal was discarded at L4, so timing
+        # had to be reconstructed from tau*, hours_mean and the visit law.
+        #
+        # Each lot gets the day by which its own cumulative share is due, so a
+        # GT whose demand ends on day 26 is pulled forward and one with 43% due
+        # after day 21 becomes late-heavy -- without naming either explicitly.
+        _dl = None
+        _ph = _phase.get((p, gt))
+        if _ph:
+            _sizes = lot_list if lot_list else [qty] * n
+            _cum = 0.0
+            _dl = []
+            _tot = sum(_sizes) or 1.0
+            for _q in _sizes:
+                _cum += _q
+                _target = _cum / _tot
+                _run = 0.0
+                _day = _ph[-1][0]
+                for _d, _dq in _ph:
+                    _run += _dq
+                    if _run / max(_ph_tot.get((p, gt), 1.0), 1e-9) >= _target:
+                        _day = _d
+                        break
+                _dl.append(int(_day))
         rows.append({"plant": p, "gt_code": gt, "mould_set": x["mould_set"],
                      "need": need, "n_lots": n, "lot_qty": round(qty, 1),
                      "lot_sizes": ([round(v, 1) for v in lot_list]
                                    if lot_list else [round(qty, 1)] * n),
+                     "lot_deadlines": _dl,
                      "min_lot": round(mn, 1), "max_lot": round(mx, 1),
                      "policy": "; ".join(pol) or "cure-hours shape",
                      "capped": capped})
     lots = pl.DataFrame(rows)
     lots.write_parquet(D / f"l45_lots_{a.month}.parquet")
+    _stamp.write(D / f"l45_lots_{a.month}.parquet")
 
     act = lots.filter(pl.col("n_lots") > 0)
     print("\n  LOT PLAN")

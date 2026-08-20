@@ -1,0 +1,338 @@
+1. First calculate this exact waterfall
+
+Take the same month, same demand, same available machines, same downtime/calendar.
+
+Demand
+  ↓
+Eligible SKUs
+  ↓
+Curing-feasible quantity
+  ↓
+Mould-feasible quantity
+  ↓
+Inch-lock feasible quantity
+  ↓
+Curing capacity
+  ↓
+Building-feasible quantity
+  ↓
+Building capacity
+  ↓
+Scheduled quantity
+  ↓
+Actually completed quantity
+
+At every step ask:
+
+How many tyres did I lose here, and WHY?
+
+For example:
+
+Stage	Qty
+Demand	100,000
+Curing feasible	98,500
+Mould feasible	97,000
+Curing capacity	96,000
+Building feasible	95,000
+Scheduler output	90,000
+
+Then you immediately know the problem is not "optimizer is bad" generally — 5,000 tyres are being lost inside your scheduling logic.
+
+2. Compare plant vs your engine on the SAME SKU
+
+This is probably the most important analysis.
+
+For every SKU:
+
+SKU
+Demand
+Plant Production
+Your Production
+Difference
+Plant Presses
+Your Presses
+Plant Mould
+Your Mould
+Plant Cycle Time
+Your Cycle Time
+Plant Changeovers
+Your Changeovers
+
+Sort by:
+
+largest Plant Production − Scheduler Production
+
+You'll probably discover something like:
+
+SKU A   Plant 8,000   Engine 6,200   LOSS 1,800
+SKU B   Plant 7,500   Engine 6,900   LOSS   600
+SKU C   Plant 6,000   Engine 5,950   LOSS    50
+
+Now investigate A first.
+
+3. Find the biggest difference in machine allocation
+
+This is where I strongly suspect your scheduler may be losing throughput.
+
+For each SKU:
+
+Plant:
+SKU A → Press 101,102,103,104,105
+
+Engine:
+SKU A → Press 101,102,103
+
+Your engine may technically know that 5 presses are allowable, but later constraints may eliminate 2.
+
+So create:
+
+SKU
+Initial Allowable Presses
+After Mould Filter
+After Inch Lock
+After Calendar
+After Capacity
+After Optimization
+FINAL PRESSES
+
+Example:
+
+SKU A
+Initial allowable       12
+Mould feasible           9
+Inch-lock feasible       7
+Calendar feasible        7
+Optimizer selected       4   ← 🚨 INVESTIGATE
+
+If the plant uses 7 and your optimizer uses 4, you found a major problem.
+
+4. Check whether you are over-constraining
+
+This is one of the first things I'd investigate in your code.
+
+Your logic may be doing:
+
+Allowable Building
+AND
+Allowable Curing
+AND
+Mould
+AND
+Inch lock
+AND
+Same press
+AND
+Same campaign
+AND
+Lot size
+AND
+Changeover
+AND
+Buffer
+
+Individually these rules may be correct.
+
+But their combination may be unnecessarily restrictive.
+
+Plant may be using:
+
+"If feasible, run it."
+
+Your engine may be saying:
+
+"Only run it if every preferred condition is simultaneously satisfied."
+
+That can easily create your 90% ceiling.
+
+5. Check your lot sizing
+
+You previously found lots being split / small lots.
+
+This is important.
+
+Compare:
+
+Plant:
+SKU A → 500 + 500 + 500
+
+Engine:
+SKU A → 70 + 80 + 65 + 75 + 90...
+
+Small lots create:
+
+More changeovers → more lost press time → lower throughput.
+
+Calculate:
+
+Plant changeovers
+vs
+Engine changeovers
+
+Plant setup hours
+vs
+Engine setup hours
+
+If your engine has significantly more changeover hours, that's a direct explanation for the 10%.
+
+6. Check GT starvation
+
+Don't only look at total Building production.
+
+Look at minute-by-minute / shift-by-shift curing starvation.
+
+For every curing press:
+
+Available time
+- Running time
+- Changeover
+- Idle because GT unavailable
+- Idle because mould unavailable
+- Idle because wrong SKU
+
+Especially:
+
+How many hours did my curing presses sit idle while Building had capacity?
+
+That tells you whether your Building→Curing synchronization is wrong.
+
+7. Check GT inventory
+
+This is VERY important given your previous issue.
+
+Calculate:
+
+GT Produced
+GT Consumed by Curing
+GT Closing Inventory
+
+If your engine gives:
+
+Building = 100,000
+Curing   = 90,000
+GT Inv   = +10,000
+
+then your problem isn't Building capacity.
+
+Your scheduler is producing 10,000 tyres that curing cannot consume.
+
+Your target should be closer to:
+
+Building → just enough ahead of Curing
+Curing   → maximum feasible consumption
+GT Inv   → controlled buffer
+8. Do a "constraint kill test"
+
+This is probably the fastest way to locate the bad code.
+
+Run your scheduler multiple times:
+
+Run 1 — Current engine
+Production = 90%
+Run 2 — Remove changeover optimization
+
+If:
+
+90% → 94%
+
+Changeover logic is costing you 4%.
+
+Run 3 — Relax lot-size restriction
+90% → 96%
+
+Lot sizing is costing you 6%.
+
+Run 4 — Relax inch-lock constraint
+90% → 98%
+
+Now you know inch-lock is responsible for ~8%.
+
+Run 5 — Remove mould restriction temporarily
+
+etc.
+
+This is basically a constraint sensitivity analysis.
+
+9. Add a rejection reason to EVERY scheduling decision
+
+This is the biggest code improvement I'd make.
+
+Don't let your scheduler simply say:
+
+if not feasible:
+    continue
+
+Instead capture:
+
+SKU
+Lot
+Machine
+Time
+Rejected?
+Reason
+
+For example:
+
+SKU A
+Press 104
+10:00
+REJECTED
+Reason = MOULD_UNAVAILABLE
+
+Then your final report becomes:
+
+Rejected lots:
+
+Mould unavailable        4,250
+No allowable press       2,100
+Inch-lock violation      1,300
+Changeover restriction     900
+Capacity exhausted         750
+GT unavailable             700
+Other                      ...
+------------------------------
+TOTAL LOST               10,000
+
+Now you know exactly where your 10% went.
+
+10. Most important comparison: Plant vs Engine
+
+Don't compare only:
+
+Plant = 100, Engine = 90
+
+Compare this:
+
+                    PLANT       ENGINE
+Demand              100,000     100,000
+Building             102,000      98,000
+Curing                100,000      90,000
+GT inventory            2,000       8,000
+Press utilization         92%         83%
+Changeover hours         500         900
+Mould idle hours         200         600
+GT starvation hours      100       1,200
+Presses used             165         145
+
+This table will tell you what your engine is doing wrong much faster than reading thousands of lines of code.
+
+What I would do in your code FIRST
+
+Don't rewrite the scheduler yet.
+
+Add these 5 diagnostics:
+
+Per-SKU plant vs engine production
+Per-SKU allowable press count before/after every filter
+Machine utilization + idle reason
+Changeover count/hours
+Every rejected lot with rejection reason
+
+Then run the same June/July dataset through it.
+
+The goal
+
+Find:
+
+Where exactly do the 10,000 tyres disappear?
+
+Once you have that, we can go into your actual code and identify which function/constraint is causing the loss, instead of guessing.

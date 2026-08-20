@@ -1,0 +1,13 @@
+{
+  "flags": {
+    "PLANNER_L45_CAMP_STAT": "",
+    "PLANNER_LOOKAHEAD_PRORATA": "",
+    "PLANNER_OPENING_GT": "",
+    "PLANNER_TH_MIN_LOT_UNITS": "",
+    "PLANNER_TH_MIN_DEMAND_UNITS": "",
+    "PLANNER_L45_CAMP_MIN_H": "",
+    "PLANNER_SLICE_MULT": "",
+    "PLANNER_L45_CONC_FLOOR": ""
+  },
+  "sha1": "196a31164fb2"
+}

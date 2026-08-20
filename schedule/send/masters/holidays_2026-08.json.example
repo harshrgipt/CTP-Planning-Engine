@@ -1,0 +1,33 @@
+{
+  "_README": [
+    "PLANT CLOSURE CALENDAR, rule G3. Read by planner/cmbc/holiday.py via",
+    "planner.paths.holidays(month). RENAME THIS FILE TO holidays_2026-08.json",
+    "TO ARM IT -- while it ends in .example nothing opens it, and the engine is",
+    "byte-identical to a run with no calendar at all.",
+    "",
+    "A holiday is a PLANT-DAY, 07:00 -> 07:00. '2026-08-15' therefore closes",
+    "[2026-08-15 07:00, 2026-08-16 07:00): no press cures and no machine builds",
+    "in that window. Work is not lost -- a cure campaign that meets the closure",
+    "PAUSES and resumes, a build run is finished before the plant shuts.",
+    "",
+    "Two accepted shapes:",
+    "  a bare list          [\"2026-08-15\"]              closes BOTH plants",
+    "  an object            {\"all\": [...],              closes both",
+    "                        \"PCR\": [...],              PCR only",
+    "                        \"TBR\": [...]}              TBR only",
+    "",
+    "For an A/B arm use the env var instead -- it takes priority over this file:",
+    "  PLANNER_HOLIDAYS=2026-08-15",
+    "  PLANNER_HOLIDAYS=PCR:2026-08-15,TBR:2026-08-16",
+    "  PLANNER_HOLIDAYS=            (set but empty = explicitly NO holidays,",
+    "                                suppresses this file so an arm can prove",
+    "                                the negative)",
+    "",
+    "BEFORE ARMING THIS ON A NEW MONTH, CHECK R5. A closed day spends shelf",
+    "life: August 2026 went from 64.2 h to 69.0 h of max GT wait on PCR against",
+    "a HARD 72 h limit. Two consecutive closed days, or one in a tighter month,",
+    "will breach it, and R5 volume is LOST rather than delayed. The measurement",
+    "is in planner/cmbc/holiday.py and PARTITION_AND_CHANGEOVER.md 4aa."
+  ],
+  "all": ["2026-08-15"]
+}

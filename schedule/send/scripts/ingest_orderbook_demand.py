@@ -19,7 +19,7 @@ WHAT THE WORKBOOK GIVES AND WHAT IT DOES NOT
     file. There is therefore NO due-date profile in this data. We do not invent
     one: each (plant, GT, SKU) gets ONE row carrying the whole month's
     requirement, dated the last day of the month. A flat daily spread would look
-    like information and be none -- and no L-layer reads `day`/`due_date` anyway
+    like information and be none -- and `due_date` has no live reader, but L4.5 DOES read `day` (l45_lotsize.py, per-GT phase curve -> lot_deadlines), so an unphased book collapses every deadline to one value and L5's earliest-deadline sort degenerates -- checked 2026-08-18
     (L4 aggregates to (plant, gt_code); the columns exist for the exports).
   * `Requirement` is fractional on some rows (e.g. 433422.1 total). Kept as
     float through the mapping and rounded ONCE at the end with largest-remainder

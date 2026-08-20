@@ -71,11 +71,85 @@ def run(csv: Path, month: str, *, write: bool = True) -> pl.DataFrame:
     n_in, q_in = d.height, d["qty"].sum()
 
     # ---- 1. the recipe chain -------------------------------------------
+    # ORDER MATTERS AND IT IS NOT THE OBVIOUS ONE. `gt_sku_master` returns the
+    # BOM namespace for TBR ("GT 5002", "GT 5003"); the engine plans in the MES
+    # namespace ("10.00 R 20 JDE"). The two have ZERO string overlap, so a book
+    # resolved through gt_sku_master alone produces TBR GT codes that match
+    # NOTHING in cap_machine/cap_press -- 0 of 39 on the 2026-08 revision.
+    # Preflight catches it (eligibility.plant_dead), but only after the fact.
+    #
+    # `gt_sku_from_recipe` is the correct bridge and IS the MES namespace, so it
+    # is consulted FIRST and gt_sku_master only fills what it leaves null.
+    # This is the GT namespace trap in CLAUDE.md; it has now cost this project
+    # three separate debugging sessions.
+    rec = (pl.read_parquet(paths.wh_derived("gt_sku_from_recipe.parquet"))
+           .select(["plant", "sku_code", "gt_code"])
+           .rename({"sku_code": "sku"})
+           .unique(subset=["sku"]))
     gsm = (pl.read_parquet(paths.wh_derived("gt_sku_master.parquet"))
            .select(["plant", "sku_code", "gt_code"])
            .rename({"sku_code": "sku"})
            .unique(subset=["sku"]))
-    d = d.join(gsm, on="sku", how="left")
+    # ---- 1b. what previous months already resolved ----------------------
+    # A demand master is a PLANT-CONFIRMED SKU -> GT mapping that has already
+    # been planned and shipped. It is better evidence than the BOM and it is the
+    # only route for a SKU the recipe table has never seen. `ingest_orderbook_
+    # demand` gets these for free because the order book carries a GT label
+    # column; a bare SKU list like Book2 does not, so it has to look them up.
+    prior = [f for f in sorted((paths.MASTERS / "demand").glob("demand_*.parquet"))
+             if ".book2" not in f.name]
+    if prior:
+        hist = (pl.concat([pl.read_parquet(f).select("plant", "sku", "gt_code")
+                           for f in prior], how="vertical")
+                  .drop_nulls("gt_code").unique(subset=["sku"]))
+    else:
+        hist = pl.DataFrame(schema={"plant": pl.Utf8, "sku": pl.Utf8,
+                                    "gt_code": pl.Utf8})
+
+    # ---- 1c. BOM short code -> engine code ------------------------------
+    # The engine's TBR namespace contains BOTH size-led codes ("10.00 R 20 JDE")
+    # and LONG BOM codes ("GT 5078 - 295/80R22.5 JUX E"). gt_sku_master returns
+    # the SHORT head ("GT 5078"), which matches neither. gt_namespace.
+    # resolve_gt_label expands head -> long code and returns None when more than
+    # one candidate matches, so an ambiguous head is never guessed.
+    #
+    # The namespace is built from COMMITTED masters, not from v_build:
+    # gt_namespace.mes_namespace() queries the raw MES, which a clone does not
+    # have. cap_machine/cap_press/recipe/prior-demand between them are exactly
+    # the codes a plan can actually use, which is the right set anyway.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from gt_namespace import resolve_gt_label                   # noqa: E402
+    ns: dict[str, list[str]] = {}
+    for f in ("cap_machine", "cap_press"):
+        for m in sorted(paths.WH_DERIVED.glob(f"{f}_*.parquet")):
+            for p, g in pl.read_parquet(m).select("plant", "gt_code").unique().rows():
+                ns.setdefault(p, []).append(g)
+    for p, g in (pl.read_parquet(paths.wh_derived("gt_sku_from_recipe.parquet"))
+                 .select("plant", "gt_code").drop_nulls().unique().rows()):
+        ns.setdefault(p, []).append(g)
+    if hist.height:
+        for p, g in hist.select("plant", "gt_code").unique().rows():
+            ns.setdefault(p, []).append(g)
+    ns = {k: sorted(set(v)) for k, v in ns.items()}
+
+    def _expand(gt: str | None, plant: str | None) -> str | None:
+        if not gt or not plant:
+            return None
+        code, _tier = resolve_gt_label(gt, plant, ns)
+        return code
+
+    gsm = gsm.with_columns(
+        pl.struct(["gt_code", "plant"]).map_elements(
+            lambda r: _expand(r["gt_code"], r["plant"]),
+            return_dtype=pl.Utf8).alias("gt_code"))
+
+    d = (d.join(rec, on="sku", how="left")
+          .join(hist, on="sku", how="left", suffix="_hist")
+          .join(gsm, on="sku", how="left", suffix="_bom")
+          .with_columns(
+              pl.coalesce("plant", "plant_hist", "plant_bom").alias("plant"),
+              pl.coalesce("gt_code", "gt_code_hist", "gt_code_bom").alias("gt_code"))
+          .drop("plant_hist", "gt_code_hist", "plant_bom", "gt_code_bom"))
     n_chain = d.filter(pl.col("plant").is_not_null()).height
 
     # ---- 2. rim fallback, plant only (GT stays null -> unplannable) -----

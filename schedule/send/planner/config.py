@@ -237,6 +237,22 @@ class Thresholds(BaseSettings):
     # ~5h of phase lead first. Arm the cap AFTER W is under 9h, where it becomes
     # a harmless safety net instead of an output limiter.
     gt_wip_cap: dict[str, int] = {"PCR": 0, "TBR": 0}
+    # HARD cap on tyres CURED per plant-day (07:00 -> 07:00). 0 = OFF per plant,
+    # and it SHIPS OFF on both. Read by l5_cure_master's daily-rate governor and
+    # by nothing else; the governor itself is gated on PLANNER_L5_DAY_CAP=1, so
+    # this dict is inert until that flag is set.
+    #
+    # NOT A MINED CONSTANT and deliberately not defaulted to one. A level daily
+    # rate is a PLANT INSTRUCTION ("cure 13,000/day"), so the number has to come
+    # from the instruction, not from a quantile of our own history -- that is the
+    # mined-median-as-a-floor defect PARTITION_AND_CHANGEOVER §1 records twice.
+    # Set it per experiment:
+    #     PLANNER_TH_CURE_DAY_CAP='{"PCR":13000,"TBR":3200}'
+    #
+    # MEASURED 2026-08-19 ON JULY -- see the DAILY CURE-RATE GOVERNOR block in
+    # planner/cmbc/l5_cure_master.py for the arms, the numbers and the reason it
+    # ships off.
+    cure_day_cap: dict[str, int] = {"PCR": 0, "TBR": 0}
     # MINIMUM RUNNABLE LOT (rule B12 / R9). A supervisor will not set up a
     # machine for a handful of tyres. Without a floor the plan emitted PCR p50
     # 76 and TBR p50 23, with 61%/98% of lots below 150 units and 101 lots of a
@@ -329,3 +345,29 @@ CONFIG = Config()
 # tuning knob, so the engine reads this module constant instead and every
 # module that needs it imports from here rather than re-declaring 72.0.
 GT_SHELF_LIFE_H: float = 72.0
+
+# ---------------------------------------------------------------------------
+# PRESS ROSTER -- the plant's own list, not a mined count.
+#
+# Source: "CTP Set up building ,curing and inspection (1) 3.xlsx" (plant, 2026-08-17)
+#     Sheet1 = 86 PCR presses      Sheet2 = 80 TBR presses
+# The workbook's Machine IDs (5401) map to engine press ids through
+# press_mould_change.wc_id (54).
+#
+# VERIFIED 2026-08-17 against cap_press_2026-07:
+#     PCR  86 in the file == 86 in cap_press        exact match
+#     TBR  80 in the file vs 79 in cap_press        press 169 (plant id 5433)
+#          is in the plant's list and MES shows it running 237 days at
+#          42 tyres/day -- but it has NO (gt, press) rows in cap_press, so the
+#          planner has never scheduled anything on it.
+#
+# CHANGING THIS NUMBER ALONE ADDS NO CAPACITY. It is the denominator of every
+# press-utilisation figure in L11, arm_scorecard and diag_plant_vs_engine.
+# Press 169 becomes usable only when it gains eligibility rows; until then
+# raising TBR to 80 makes utilisation read ~1.3 % LOWER, correctly, because we
+# are leaving a real press idle.
+#
+# Supersedes the 2026-08-14 working ruling of 86/79. Four other masters
+# (cycle_time_curing, allowed_press_matrix, capacity_press_day, plant_profile)
+# say 92/80 -- the 92 is stale; this file is the authority.
+PRESS_ROSTER: dict[str, int] = {"PCR": 86, "TBR": 80}

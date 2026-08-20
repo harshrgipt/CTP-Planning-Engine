@@ -172,12 +172,73 @@ def run(month: str, pcr: Path | None, tbr: Path | None,
     # engine's planning key. This is what lets L5 know which GT each press was
     # already running at month start, so it can CONTINUE it instead of paying a
     # mould change and waiting for fresh supply.
+    # THREE-TIER, AND THE OBVIOUS TABLE IS THE ONE THAT DOES NOT WORK.
+    # gt_sku_master.recipe_id matched 0 of 30 TBR press recipes -- every TBR
+    # press came out unresolved on both months, which is why TBR never got the
+    # warm-press correction PCR did. The recipe IDs on the presses are CURING
+    # recipe ids ("787", "1246"); gt_sku_master keys something else.
+    #
+    #   1. recipe_gt_sku.curing_recipe_id -> gt_name   ALREADY the MES namespace
+    #   2. recipe_bridge.curingRecipeID  -> gt_code    BOM short code ("GT 5002"),
+    #      expanded through gt_namespace.resolve_gt_label, which returns None on
+    #      ambiguity so a head is never guessed onto the wrong GT
+    #   3. gt_sku_master                               last, and for PCR only in
+    #      practice -- it is the BOM namespace for TBR (the documented trap)
+    #
+    # Measured 2026-08: 13 of 30 recipes resolve (11 direct + 2 numeric-head),
+    # covering 43 of 75 TBR presses, against 0 before. The other 17 recipes are
+    # absent from every bridge -- those GTs have never been cured in the mined
+    # window, so no evidence exists to map them and nothing is invented.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from gt_namespace import resolve_gt_label                   # noqa: E402
+
+    ns: dict[str, list[str]] = {}
+    for _f in ("cap_machine", "cap_press"):
+        for _m in sorted(paths.WH_DERIVED.glob(f"{_f}_*.parquet")):
+            for _p, _g in pl.read_parquet(_m).select("plant", "gt_code").unique().rows():
+                ns.setdefault(_p, []).append(_g)
+    ns = {k: sorted(set(v)) for k, v in ns.items()}
+
+    rgs = pl.read_parquet(paths.wh_derived("recipe_gt_sku.parquet"))
+    direct = {str(r["curing_recipe_id"]).strip(): r["gt_name"]
+              for r in rgs.iter_rows(named=True)
+              if r.get("curing_recipe_id") is not None and r.get("gt_name")}
+    rb = pl.read_parquet(paths.wh_derived("recipe_bridge.parquet"))
+    bom = {str(r["curingRecipeID"]).strip(): r["gt_code"]
+           for r in rb.iter_rows(named=True) if r.get("curingRecipeID") is not None}
     gsm = pl.read_parquet(paths.wh_derived("gt_sku_master.parquet"))
     r2g = {str(r["recipe_id"]).strip(): r["gt_code"]
            for r in gsm.iter_rows(named=True) if r.get("recipe_id") is not None}
+
+    _tier: dict = {}
+
+    def _resolve(rec: str | None, plant: str) -> str | None:
+        if not rec:
+            return None
+        known = ns.get(plant, [])
+        g = direct.get(rec)
+        if g and g in known:
+            _tier[rec] = "direct"
+            return g
+        b = bom.get(rec)
+        if b:
+            c, t = resolve_gt_label(b, plant, ns)
+            if c:
+                _tier[rec] = f"expand:{t}"
+                return c
+        g = r2g.get(rec)
+        if g and g in known:
+            _tier[rec] = "master"
+            return g
+        _tier[rec] = "unresolved"
+        return None
+
     df = df.with_columns(
-        pl.col("modal_recipe").map_elements(lambda x: r2g.get(x),
-                                            return_dtype=pl.Utf8).alias("current_gt"))
+        pl.struct(["modal_recipe", "plant"]).map_elements(
+            lambda r: _resolve(r["modal_recipe"], r["plant"]),
+            return_dtype=pl.Utf8).alias("current_gt"))
+    from collections import Counter as _C
+    print(f"  recipe->GT tiers: {dict(_C(_tier.values()))}")
     cur = df.filter(pl.col("is_current"))
     res = cur.filter(pl.col("current_gt").is_not_null())
     print(f"  press -> current GT resolved: {res.height} of {cur.height} presses "

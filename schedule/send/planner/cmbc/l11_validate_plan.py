@@ -30,14 +30,16 @@ from __future__ import annotations
 
 import argparse
 import calendar
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 
-from planner.config import CONFIG, GT_SHELF_LIFE_H
+from planner.cmbc import holiday
+from planner.config import CONFIG, GT_SHELF_LIFE_H, PRESS_ROSTER
 from planner.data.warehouse import duck
 from planner import paths
 
@@ -194,6 +196,7 @@ def main() -> None:
     ap.add_argument("--run", default=None)
     a = ap.parse_args()
     run = ROOT / "runs" / (a.run or f"cmbc_{a.month}")
+    holiday.load(a.month)              # rule G3; empty = every call is identity
     # Fingerprint the plan BEFORE reading it, and clear any inherited scorecard.
     _fp = _assert_fresh(run)
 
@@ -263,6 +266,18 @@ def main() -> None:
         # bimodality (TBR had 78 campaigns below 200 h and 68 above 330).
         ch = camp.filter(pl.col("plant") == p)
         lo, hi = (40.0, 75.0) if p == "PCR" else (200.0, 330.0)
+        # ---- PLANT HOLIDAY (rule G3) -------------------------------------
+        # THE BAND IS ABOUT CAMPAIGN LENGTH, NOT ELAPSED TIME. A campaign that
+        # pauses over a closure has the SAME press-hours and a wall-clock span
+        # 24 h longer, so grading `hours` would fail a campaign for a reason
+        # that has nothing to do with how it was sized -- and on PCR, whose
+        # band is 40-75 h, a single closed day is a third of the band. Grade
+        # the working hours. Column arithmetic is untouched when no calendar is
+        # configured, so this cannot move an existing result.
+        if holiday.ACTIVE:
+            _wh = [holiday.work_seconds(p, r["start_ts"], r["end_ts"]) / 3600.0
+                   for r in ch.iter_rows(named=True)]
+            ch = ch.with_columns(pl.Series("hours", _wh))
         h50 = float(ch["hours"].median())
         in_band = ch.filter((pl.col("hours") >= lo)
                             & (pl.col("hours") <= hi)).height
@@ -486,7 +501,16 @@ def main() -> None:
         for r in ch.iter_rows(named=True):
             d0, d1 = r["start_ts"].date(), r["end_ts"].date()
             for k in range((d1 - d0).days + 1):
-                rd.add((r["press"], d0 + timedelta(days=k)))
+                _d = d0 + timedelta(days=k)
+                # HOLIDAY: a paused campaign still HOLDS the press across the
+                # closure, but the plant is shut -- counting the closed day as
+                # an occupied press-day inflates the denominator and makes the
+                # changeover rate look better than it is. Fourth denominator
+                # defect in this project if left in (PARTITION §1).
+                if holiday.ACTIVE and holiday.is_blocked(
+                        p, datetime(_d.year, _d.month, _d.day, 12, 0)):
+                    continue
+                rd.add((r["press"], _d))
         rate = chg / max(len(rd), 1)
         capr = 0.08 if p == "PCR" else 0.04   # plant July, same denominator
         check(f"{p} mould changes / press-day occupied", f"{rate:.2f}",
@@ -534,8 +558,82 @@ def main() -> None:
         if _fedcol == "qty_fed":
             print("  !! cure_campaigns_reconciled has no qty_fed_in_month -- "
                   "fulfilment INCLUDES the carry-out tail and is overstated")
+        # LOOKAHEAD MUST LEAVE BOTH SIDES OF THE RATIO, NOT ONE.
+        # `_sc` is filtered above (~lookahead) so the DENOMINATOR excludes
+        # next-month GTs. The NUMERATOR reads `rec`, which still contains their
+        # cure campaigns -- so arming --lookahead-days would raise fulfilment by
+        # construction, with no extra tyre made. Sixth-and-a-half instance of the
+        # basis class; caught before the flag was ever measured.
+        _la_gts: set = set()
+        if "lookahead" in req.columns:
+            _la_gts = {(r["plant"], r["gt_code"])
+                       for r in req.filter(pl.col("lookahead")).iter_rows(named=True)}
+        # AND CAP EACH GT AT ITS OWN IN-MONTH REQUIREMENT.
+        # Dropping lookahead-ONLY GTs is not enough: a GT demanded in BOTH months
+        # keeps its next-month cures in the numerator while `gross_build_la` has
+        # already removed them from the denominator -- output counted once,
+        # requirement counted zero times. Measured 2026-08-14, July + 3 d
+        # lookahead: PCR read 98.4 % with 9,169 of its 388,262 cures (2.4 %)
+        # ABOVE July's own demand, TBR 97.8 % with 3,312 (3.4 %). Capped, the
+        # real figures are PCR +338 tyres and TBR -1,853 against the base.
+        # A cure beyond this month's requirement for that GT serves NEXT month;
+        # it is real output and belongs in BUILT, never in this ratio.
+        _cap = {}
+        if "gross_build" in req.columns:
+            for _r in req.iter_rows(named=True):
+                _gb = float(_r["gross_build"] or 0.0) - float(
+                    _r.get("gross_build_la") or 0.0)
+                _cap[(_r["plant"], _r["gt_code"])] = max(_gb, 0.0)
+        if _cap and _fedcol in rec.columns:
+            rec = rec.with_columns(
+                pl.struct(["plant", "gt_code"]).map_elements(
+                    lambda x: _cap.get((x["plant"], x["gt_code"]), 1e18),
+                    return_dtype=pl.Float64).alias("_cap"))
+            _byg = (rec.group_by(["plant", "gt_code"])
+                    .agg(pl.col(_fedcol).sum().alias("_tot"),
+                         pl.col("_cap").first()))
+            _over = float((_byg["_tot"] - _byg["_cap"]).clip(lower_bound=0).sum())
+            if _over > 0:
+                _sc_f = (_byg.with_columns(
+                    (pl.min_horizontal(pl.col("_tot"), pl.col("_cap"))
+                     / pl.col("_tot").clip(lower_bound=1e-9)).alias("_f"))
+                    .select(["plant", "gt_code", "_f"]))
+                rec = (rec.join(_sc_f, on=["plant", "gt_code"], how="left")
+                       .with_columns((pl.col(_fedcol)
+                                      * pl.col("_f").fill_null(1.0)).alias(_fedcol)))
+                print(f"  fulfilment numerator capped at this month's own "
+                      f"requirement: {_over:,.0f} tyres of NEXT-month cure "
+                      f"excluded (they are real output, counted in BUILT)")
+            rec = rec.drop([c for c in ("_cap", "_f") if c in rec.columns])
+        if _la_gts:
+            rec = rec.filter(~pl.struct(["plant", "gt_code"]).map_elements(
+                lambda x: (x["plant"], x["gt_code"]) in _la_gts,
+                return_dtype=pl.Boolean))
+            print(f"  lookahead: {len(_la_gts)} next-month GTs excluded from the "
+                  f"fulfilment NUMERATOR as well as the denominator")
         for _p in ["PCR", "TBR"]:
-            _n = float(_sc.filter(pl.col("plant") == _p)["gross_build"].sum())
+            _sp = _sc.filter(pl.col("plant") == _p)
+            # Subtract the lookahead QUANTITY, do not drop whole GTs -- a GT
+            # demanded in both months belongs partly to each.
+            # NUMERATOR AND DENOMINATOR MUST COUNT THE SAME TYRES.
+            # `_g` below is `qty_fed[_in_month]` -- green tyres DELIVERED INTO
+            # PRESSES, which includes the opening floor stock. `gross_build`
+            # EXCLUDES it: it is what building must make after opening stock is
+            # netted off. Dividing one by the other overstated fulfilment by the
+            # whole opening-stock term -- +1.16 / +1.20 pt (Jul PCR/TBR) and
+            # +0.94 / +0.94 (Aug), on every arm this project has ever scored.
+            # The ratio also cancelled `cure_yield` out entirely, so the R15
+            # gross-up appeared in no reported number.
+            # `cure_requirement` is the same universe as `qty_fed`: green tyres
+            # the presses must consume, opening stock included.
+            _dcol = ("cure_requirement" if "cure_requirement" in _sp.columns
+                     else "gross_build")
+            _n = float(_sp[_dcol].sum())
+            _lacol = _dcol + "_la"
+            if _lacol in _sp.columns:
+                _n -= float(_sp[_lacol].sum())
+            elif "gross_build_la" in _sp.columns:
+                _n -= float(_sp["gross_build_la"].sum())
             _rp = rec.filter(pl.col("plant") == _p)
             _g = float(_rp[_fedcol].sum())
             if _n > 0:
@@ -556,6 +654,128 @@ def main() -> None:
     check("residual demand flagged not dropped",
           f"{resid.height} GTs / {int(resid['demand'].sum()):,} tyres",
           "100% flagged", True, "B12 step 6")
+
+    # ---- PLANT-OBSERVED CEILING -- never measure ourselves against ourselves
+    #
+    # THE ERROR THIS PREVENTS, made 2026-08-14 and repeated across a whole
+    # session. The press ceiling was computed as
+    #     roster x 744 h - mould hours,  x  OUR OWN campaign rate (qty/hours)
+    # and July was declared "over-committed by 502 tyres, physically infeasible".
+    # It is not. That rate is a property of OUR plan's GT mix and cycle times, so
+    # the test asks "can our plan achieve our plan's rate" -- circular, and it
+    # silently converts every scheduling shortfall into a capacity excuse.
+    #
+    # `l3_cavities.parquet` holds what the plant's OWN presses demonstrably do:
+    #     PCR 13,179 tyres/day median over 86 presses  -> 408,549 / 31 d
+    #     TBR  3,403 tyres/day median over 79 presses  -> 105,493 / 31 d
+    # against July demand of 398,405 / 98,020. There is ~10,000 PCR of headroom,
+    # not a deficit. Print BOTH the plant rate and ours on every run so the
+    # comparison is never reconstructed by hand again.
+    _ROSTER = dict(PRESS_ROSTER)          # plant file, see config.py
+    try:
+        _cav = pl.read_parquet(D / "l3_cavities.parquet")
+        _cpf = pl.read_parquet(D / f"cap_press_{a.month}.parquet")
+    except Exception:
+        _cav = None
+    if _cav is not None:
+        _y2, _m2 = int(a.month[:4]), int(a.month[5:7])
+        _nd2 = calendar.monthrange(_y2, _m2)[1]
+        for _p in ("PCR", "TBR"):
+            _use = set(_cpf.filter(pl.col("plant") == _p)["press"].unique().to_list())
+            _c = (_cav.filter((pl.col("plant") == _p)
+                              & pl.col("press").is_in(list(_use)))
+                  .sort("tyres_per_day", descending=True).head(_ROSTER[_p]))
+            if not _c.height:
+                continue
+            _pl_day = float(_c["tyres_per_day"].sum())
+            _ceil = _pl_day * _nd2
+            _need = float(req.filter((pl.col("plant") == _p)
+                                     & ~pl.col("residual"))["demand"].sum())
+            _got = float(rec.filter(pl.col("plant") == _p)[_fedcol].sum())                 if _fedcol in rec.columns else 0.0
+            check(f"{_p} demand within plant-observed ceiling",
+                  f"{_need:,.0f} vs {_ceil:,.0f}", "<= ceiling", _need <= _ceil,
+                  "l3_cavities = the plant's OWN per-press output. NEVER derive "
+                  "a ceiling from our own campaign rate -- that is circular")
+            check(f"{_p} throughput vs plant per-press rate",
+                  f"{_got / _nd2:,.0f}/day vs plant {_pl_day:,.0f}/day "
+                  f"({100 * (_got / _nd2) / _pl_day:.1f}%)",
+                  ">= 95% of plant", (_got / _nd2) / _pl_day >= 0.95,
+                  "same 86/79 presses -- any gap here is OURS, not capacity")
+
+    # ---- THE CARRY METER -- the boundary debt, in HOURS OF PRODUCTION -------
+    #
+    # WHY THIS EXISTS. A rolling boundary contract over an over-committed month
+    # does not settle, it accumulates. Measured on the Jul->Aug->Sep chain:
+    #     Jul -> Aug   PCR  7,899   TBR 2,256
+    #     Aug -> Sep   PCR 24,110   TBR 4,093     <- 3.05x, and WITHOUT carry-in
+    # The debt is August being over-committed by ~25,000 tyres; carry-in adds
+    # ~11 % on top of it, it does not create it. Nothing detected this, and
+    # l4b_capacity_flow is building-only so it structurally cannot.
+    #
+    # WHY HOURS, NOT A RATIO. `carry_out <= 1.25 x carry_in` breaks at the head
+    # of a chain -- the first month has carry_in = 0, so the test is either
+    # vacuous or a divide-by-zero -- and a ratio never says HOW BAD. Hours of
+    # production is comparable across plants and months and is the unit the
+    # constraint is actually in.
+    #
+    # WHY THE TAIL IS THE THRESHOLD, and why this is not an always-failing guard
+    # (EXPERT_AUDIT's fourth failure mode). The plan runs [t0, month_end + T]
+    # with T = HORIZON_TAIL_H. A carried campaign is representable in the next
+    # month's carry-in only if it fits inside that tail. So carry-out > T is a
+    # genuine correctness bound, not a preference -- past it the contract breaks
+    # silently. Measured today: Jul->Aug 14.6 h PCR / 17.1 h TBR, Aug->Sep 48.2 h
+    # / 39.2 h. Both months PASS against a 72 h tail, and August at 48.2 h --
+    # two-thirds of the entire tail handed over before September plans anything
+    # -- is exactly the number that should be on the scorecard.
+    #
+    # SHIPPED BEFORE the Rule-T numerator fix, deliberately: once carried cures
+    # count toward fulfilment, this debt starts reading as output. Ship the meter
+    # before the thing it measures.
+    _tail_h = float(os.environ.get("PLANNER_HORIZON_TAIL_H", "72"))
+    # PLANT RULING 2026-08-14: roster is 86 PCR / 79 TBR, every month.
+    _ROSTER = dict(PRESS_ROSTER)          # plant file, see config.py
+    _cof = run / "carry_out.parquet"
+    if _cof.exists() and _tail_h > 0:
+        _co = pl.read_parquet(_cof)
+        if "busy_at_t0" in _co.columns:
+            _co = _co.filter(pl.col("busy_at_t0"))
+        for _p in ["PCR", "TBR"]:
+            _cp = camp.filter(pl.col("plant") == _p)
+            if not _cp.height:
+                continue
+            # Rate from THIS run's own realised mix, not from the fast early
+            # days: PCR runs 6.55 t/press-h on days 2-5 but 6.31 over the month
+            # (L5 sorts by -qty and PCR's biggest GTs are also its fastest), and
+            # extrapolating the head rate overstates the ceiling by ~15,000.
+            _rate_pph = float(_cp["qty"].sum()) / max(float(_cp["hours"].sum()), 1e-9)
+            _plant_th = _rate_pph * _ROSTER[_p]
+            _q = float(_co.filter(pl.col("plant") == _p)["qty"].sum())
+            _h = _q / max(_plant_th, 1e-9)
+            check(f"{_p} carry-out debt (production handed forward)",
+                  f"{_h:.1f} h  ({_q:,.0f} tyres @ {_plant_th:,.0f}/h)",
+                  f"<= {_tail_h:.0f} h tail", _h <= _tail_h,
+                  "a carried campaign is only representable in the next month's "
+                  "carry-in if it fits the horizon tail; past that the rolling "
+                  "contract breaks silently. Rising month-on-month = debt spiral")
+    _cif = Path(os.environ.get("PLANNER_CARRY_IN", "")) if os.environ.get(
+        "PLANNER_CARRY_IN") else (ROOT / "masters" / "carry_in"
+                                  / f"carry_in_{a.month}.parquet")
+    if _cif.exists():
+        _ci = pl.read_parquet(_cif)
+        if "busy_at_t0" in _ci.columns:
+            _ci = _ci.filter(pl.col("busy_at_t0"))
+        for _p in ["PCR", "TBR"]:
+            _cp = camp.filter(pl.col("plant") == _p)
+            if not _cp.height:
+                continue
+            _rate_pph = float(_cp["qty"].sum()) / max(float(_cp["hours"].sum()), 1e-9)
+            _plant_th = _rate_pph * _ROSTER[_p]
+            _q = float(_ci.filter(pl.col("plant") == _p)["qty"].sum())
+            check(f"{_p} carry-in debt (production received)",
+                  f"{_q / max(_plant_th, 1e-9):.1f} h  ({_q:,.0f} tyres)",
+                  "reported", True,
+                  "the other half of the meter -- compare with LAST month's "
+                  "carry-out debt; they must be the same number")
 
     # --- report -----------------------------------------------------------
     df = pl.DataFrame(RES)

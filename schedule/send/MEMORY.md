@@ -1935,25 +1935,69 @@ same-size improvement must not be credited to the engine.**
 
 ---
 
-## 11c. HORIZON POLICY — THE MONTH IS A CLOSED BOX (plant ruling, 2026-08-09)
+## 11c. HORIZON POLICY — closed box (plant ruling, 2026-08-09), **SUPERSEDED BY `extend` (plant ruling, 2026-08-10)**
+
+> ⚠ **STATUS CORRECTED 2026-08-19.** This section described `truncate` as SHIPPED.
+> **It has not been the shipped default since 2026-08-10.** The plant ruling of
+> that date replaced the closed box with a **split boundary**, and the code has
+> read that way since: `l5_cure_master.py` ships
+> **`PLANNER_HORIZON_MODE=extend`** with **`PLANNER_HORIZON_TAIL_H=72`** and
+> **`PLANNER_CARRY_OUT=1`**. The authoritative write-up is the
+> `---- SUPERSEDED BY "extend", PLANT RULING 2026-08-10 ----` block in
+> `planner/cmbc/l5_cure_master.py`; this section is kept for the measurement
+> below, which is still a valid comparison of the three *pre-`extend`* modes.
+>
+> **What actually changed.** The REPORTING rule is unchanged and still the
+> plant's: a tyre counts for this month only if it is **cured inside the month**
+> (`qty_fed_in_month`). What moved is the **PLANNING** horizon — a cure campaign
+> may now start inside the month and finish up to 72 h past it. Two boundaries,
+> deliberately distinct: `month_end` (reporting, never moves) and `horizon`
+> (planning, `month_end + HORIZON_TAIL_H` under `extend`).
+>
+> **The defect `extend` fixes.** Under `truncate` a campaign is cut at hour 744
+> and the press released, so nothing pulls building through the final ~25 h: PCR
+> built 5,712 tyres on day 30 and **ZERO on day 31** while the plant runs flat to
+> the last hour. Month-end GT collapsed to ~0 and the hand-off to next month was
+> fictitious. **72 h is not a tuning knob** — a green tyre may be held exactly
+> `GT_SHELF_LIFE_H = 72.0` (R5), so a cure seat further out can never be fed by
+> in-month building. It is the largest tail that does any work and the smallest
+> that does all of it.
+>
+> The carry-out tail is **not** counted as fulfilment; it is reported separately
+> (see the 2026-08-10 reference-run table at the top of this file, row
+> "incl. carry-out tail"). Deleting the tail does not move those tyres into the
+> month — it deletes them: `HORIZON_MODE=strict` costs **−30,572 BUILT** on
+> August and **−17,036 / −5,189** on July (PARTITION §4x).
 
 > *"Only demand which is filled within the month time is considered fulfilled.
 > After that, discard — that's unfulfilment."*
 
-This overrides the rolling-horizon/carry-out design in §10c and
-PARTITION §4h. It is a **business rule from the plant**, not an optimisation, and
-it is not open to re-argument.
+This overrode the rolling-horizon/carry-out design in §10c and
+PARTITION §4h. It is a **business rule from the plant**, not an optimisation —
+and it was itself amended by the plant the following day, as above. The
+*reporting* half of it still stands unaltered.
 
 `PLANNER_HORIZON_MODE` in `l5_cure_master.py`, three modes, all measured fresh:
 
 | mode | Jul PCR | Jul TBR | Aug PCR | Aug TBR | out-of-month rows |
 |---|---|---|---|---|---|
 | `window` (old carry-out) | 94.6 % | 94.2 % | 90.6 % | 92.6 % | **28 / 14 — non-compliant** |
-| **`truncate` (SHIPPED)** | **94.5 %** | **94.5 %** | **90.1 %** | **92.7 %** | **0 / 0** |
+| `truncate` (**shipped 2026-08-09 → 2026-08-10 ONLY**) | 94.5 % | 94.5 % | 90.1 % | 92.7 % | **0 / 0** |
 | `strict` | 93.5 % | 93.7 % | 89.4 % | 92.6 % | 0 / 0 |
+| **`extend` + `HORIZON_TAIL_H=72` (SHIPPED, plant ruling 2026-08-10)** | — | — | — | — | tail rows are **legitimate**, not counted |
 
-**`truncate` is shipped: identical compliance, materially cheaper.** `strict`
-("never start what cannot finish") gives up a further **1.0 pt** on July PCR,
+⚠ The winner of *this* table is `truncate`, and it was the shipped default for
+**one day**. The table compares three closed-box modes against each other; it
+does not contain the mode that actually ships. `extend` is not a fourth row of
+the same experiment — it changes the planning boundary while leaving the
+reporting boundary alone, so its fulfilment is measured on the same in-month
+basis and its tail is reported separately. Do not read "94.5 % / SHIPPED" off
+this table.
+
+**`truncate` beat `strict` among the closed-box modes: identical compliance,
+materially cheaper** (it was shipped on that basis on 2026-08-09 and superseded
+by `extend` on 2026-08-10 — see the correction at the head of this section).
+`strict` ("never start what cannot finish") gives up a further **1.0 pt** on July PCR,
 0.8 pt on July TBR and 0.7 pt on August PCR by refusing work that could have been
 delivered inside the month, and loses 2 invariants. Delivering the in-month
 portion IS "demand filled within the month"; only the cut tail is unfulfilment.
@@ -2127,9 +2171,35 @@ New: `scripts/build_sku_con_cluster.py` -> `INPUT/derived/sku_con_cluster.parque
   straddling run by its START day, or a crossing campaign by its whole duration,
   manufactures false over-capacity findings. This bug appeared three times in one
   session: press capacity, machine-day feasibility, and setup attribution.
-- **The horizon is a CLOSED BOX, not a window** (plant ruling, §11c). No row may
-  start or end outside the plant month, and nothing delivered outside it counts.
-  `verify_export.py` enforces this as HARD. Do not reintroduce carry-out.
+- ⚠ **CORRECTED 2026-08-19 — this entry said "the horizon is a CLOSED BOX... Do
+  not reintroduce carry-out". THAT IS NO LONGER THE RULE and has not been since
+  the plant ruling of 2026-08-10** (§11c, and the `SUPERSEDED BY "extend"` block
+  in `planner/cmbc/l5_cure_master.py`). Carry-out was not "reintroduced" by
+  mistake — **the plant asked for it**, and the shipped default is
+  `PLANNER_HORIZON_MODE=extend` with `PLANNER_HORIZON_TAIL_H=72` and
+  `PLANNER_CARRY_OUT=1`. **The old wording conflated three different boundaries.
+  Separate them and both the old rule and the new one are true, of different
+  things:**
+    - **PLANNING horizon — NO LONGER a closed box.** It is `month_end + 72 h`.
+      A cure campaign may start inside the month and finish in the tail. This is
+      the half the old entry got wrong.
+    - **REPORTING boundary — still the plant month, unchanged.** Nothing cured
+      outside it counts toward this month's fulfilment (`qty_fed_in_month`).
+      This is the half the plant never amended.
+    - **EXPORT — still a closed box, and still HARD-gated.** Verified on
+      `output/AUG2026_pack` 2026-08-19: sheets `1_build_schedule_shift` and
+      `2_cure_schedule_shift` have max `end_ts` exactly 2026-09-01 07:00 = the
+      plant month end, and **zero `carry_out` rows in any sheet that has the
+      column** (1, 1b, 2, 2b, 7). `scripts/verify_export.py` HARD-fails any
+      exported row starting or ending outside `[t0, t0+ndays)` and that check is
+      LIVE — it does not consult `PLANNER_HORIZON_MODE`, so the export cannot
+      silently grow a tail. **Do not weaken it.**
+  So: carry-out in the PLAN is correct and was asked for; carry-out in the
+  EXPORT is still a defect. A tail row inside the run artefacts is the press
+  genuinely occupied into next month — deleting it would let next month
+  double-book that press. **Anyone acting on the old wording would shorten the
+  planning horizon, which does not move tyres into the month — it deletes them**
+  (`strict` = −30,572 BUILT on August; PARTITION §4x).
 - Don't recurse in DuckDB — will OOM.
 - Don't `pandas.read_csv` any of the big files — use Polars `scan_csv` or DuckDB `read_csv_auto`.
 - Don't `pip install` outside `.venv`.

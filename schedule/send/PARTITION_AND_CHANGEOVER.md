@@ -229,6 +229,45 @@ instruction and is kept, but it is *not* a plant-derived limit; it is the same
 "mined stat as a hard constraint" shape as §1a and §1b. A proper fix would be a
 two-pass fixed point (place, reconcile, re-check) instead of a margin.
 
+### 1i. An arm that differs by a FILE cannot be A/B'd by `arm_scorecard.py` — 0.7 pt of phantom gain
+
+`scripts/arm_scorecard.py` separates arms by **environment variable only**. Every
+arm inside one invocation plans against whatever masters happen to be on disk at
+that moment. So when the thing under test is a *file* — `allowed_machine_matrix.parquet`,
+`gt_machine_partition.parquet`, any mined master — the script cannot see the
+difference, and a "table" assembled across several invocations with the file
+rewritten in between has rows that came from different inputs while reading as one
+experiment.
+
+**How it showed up (2026-08-17).** A three-way July table was reported as
+
+| arm | PCR ful% |
+|---|---|
+| base (no partition) | 95.8 |
+| + CP-SAT partition | 96.4 |
+| + partition + weightage | 96.6 |
+
+Re-running the top arm against the state actually left on disk returned **96.0**.
+Two *identical* arms in one invocation returned the same number **to the tyre** on
+both plants, so the engine is deterministic and this was not noise. Re-measured
+with the matrix copied into place before each arm, the real baseline is **95.1** —
+the "base" row above had been planned with the *widened* matrix already on disk,
+so it was never a baseline at all.
+
+The direction of the finding survived; the size and the baseline did not. The
+August gate run the same day **is** sound, because its driver script set the
+matrix explicitly before each arm.
+
+**Fix.** `arm_scorecard.py` now prints a `SHARED FILE INPUTS` banner — sha1, size
+and the partition's month stamp — above every table, and its docstring states the
+limitation. To A/B a file, drive it from a script that copies the file into place
+before each arm. Do not put two file-states in one invocation; it is not
+measuring what the column header says.
+
+**Class.** This is the measurement-error family of §1e (mean over events vs over
+time) and §4 (denominator defects), not the mined-statistic family of §1a–1c: the
+engine was right and the *instrument* was wrong. Fourth instance.
+
 ---
 
 ## 2. THE PARTITION (Fix 1) — `scripts/build_gt_machine_partition.py`
@@ -2183,6 +2222,646 @@ but there is 0.7 h of headroom — re-check it on any month where this is armed.
 
 ---
 
+## 4u. THE PARTITION BATCH — CP-SAT builder, B16 as an input, and four defects I introduced doing it (2026-08-17/18)
+
+Nothing in this batch was in any `.md` until now; it lived only in code comments,
+which is how §1i's phantom 0.7 pt survived long enough to be quoted back.
+
+**What shipped.** `scripts/cpsat_partition.py` replaced `build_gt_machine_partition.py`
+as the default builder. It needs no raw MES, so ANY month can be stamped — the old
+builder could not stamp July at all, which is why every July run set
+`PLANNER_PARTITION_PLANTS=` and **the partition feature shipped unused for months**.
+The model proves OPTIMAL on both plants and two rebuilds are byte-identical, verified
+across sessions (July sha1 `8a47e109e27d`, August `8bcb10c113bf`).
+
+**The measured value, with the matrix held fixed** — an earlier table in `main.py`
+straddled two states of `allowed_machine_matrix.parquet` and credited the partition
+with 4,116 tyres that were the matrix:
+
+| | PCR ful% | PCR unfed | PCR same-size |
+|---|---|---|---|
+| Jul OFF → ON | 96.1 → 96.2 | 8,670 → 8,641 | **79.0 → 81.1 %** |
+| Aug OFF → ON | 91.0 → 91.1 | 6,566 → **6,856** | **74.6 → 75.4 %** |
+
+Fulfilment is flat and August unfed goes the WRONG way. The case for the partition is
+same-size — 18 and 20 fewer different-size changeovers at 42-60 min each — which is
+what it was built for. **Do not quote it as a fulfilment gain.**
+
+**PCR ONLY.** `PLANNER_PARTITION_PLANTS` was widened to `PCR,TBR` on 08-17 and reverted
+on 08-18. TBR partitioning removes 15-24 changeovers/month but BUILT flips sign
+(−168 Jul / +174 Aug) — a two-month-gate failure, on a deterministic engine, so not
+noise. Note the first attempt at this decision compared `""` vs `PCR,TBR` — **neither
+arm was `PCR`**. Run the arm you are deciding about.
+
+**Four defects introduced by switching it on, all found by a gate, none by inspection:**
+
+| defect | found by | cost |
+|---|---|---|
+| partition ignored B16, put TL GTs on a TT machine | explicit violation check | 367 lots / 9,537 tyres across the boundary |
+| imbalance capped plant-wide, not per B16 group | partition row count (59 = PCR only) | August TBR INFEASIBLE |
+| `DET_BUDGET=60` truncated the search | bound print (gap 51.6 %) | non-reproducible partition, every run |
+| `det_time` default written in two files | `_partition_reason` output | 13 min rebuild on every plan |
+
+**And the B16 fix is INERT at the shipped default.** `l7_pull_release.py` filters
+`if r["plant"] in PARTITION_PLANTS`, so with `PCR` the TBR partition rows are built,
+B16-restricted, emitted — and discarded. The violation existed only while the default
+was `PCR,TBR`, i.e. for one day, because I made it so. Keep the restriction as a guard;
+**credit it with nothing.**
+
+---
+
+## 4v. EDD / INTRA-MONTH DUE DATES — measured, LOST 3.8 pt, and the symptom that motivated it was a measurement artefact (2026-07)
+
+Two run directories, `runs/EDD_off` and `runs/EDD_on`, have carried this result with no
+document knowing it. That is why the question keeps coming back.
+
+| | EDD off | EDD on | Δ |
+|---|---|---|---|
+| PCR fulfilment | **96.2 %** | 92.4 % | **−3.8 pt** |
+| TBR fulfilment | **96.7 %** | 93.7 % | **−3.0 pt** |
+| PCR BUILT | 385,257 | 381,156 | −4,101 |
+| PCR carry-out tail | 7,416 | 19,728 | +12,312 |
+| L11 invariants | 31/48 | 27/48 | −4 |
+
+**The symptom it was aimed at does not exist.** "L5 seats 59 % of PCR volume on day 0"
+attributes each campaign's whole quantity to its START — but a PCR cure campaign is a
+**365 h occupancy** (TBR 491 h), and 86 day-0 campaigns is 86 of 86 presses, i.e. a
+24/7 plant seating every press at hour zero. Realised delivery is already level:
+**PCR day-1 share 2.04 %, first 7 days 22.7 %, daily CV 0.097; TBR 2.39 % / 22.5 % / 0.063.**
+This is `MEMORY` §"mean over events ≠ mean over time" applied to campaign quantity.
+
+**And `due_date` is NOT lost at L4.** `net_requirement` carries no timing, but
+`l45_lotsize.py` re-reads `masters/demand/demand_<M>.parquet` directly, builds a per-GT
+phase curve from `day`, and emits `lot_deadlines`, which `l5_cure_master.py` sorts on
+behind `PLANNER_L5_EDD` (default 0). The channel exists; it is off because it loses.
+
+**Physics:** a plant with a 72 h perishable intermediate and month-long press campaigns
+cannot ship to intra-month dates from the press. It ships from finished stock; the press
+runs flat out. Deferring a seat to match a day-20 date idles the press from hour 0 and
+pushes the campaign tail past the boundary — which the tail column shows.
+
+**Do not re-open without refuting the 2.04 % day-1 share.**
+
+---
+
+## 4w. MOST-CONSTRAINED-FIRST IN THE L7 PLACEMENT HEAP — positive on both plants at B=8, ONE MONTH ONLY, default still OFF (2026-08-19)
+
+**The defect, and it is real.** In `l7_pull_release.py`'s placement heap the key is
+`(_prio, _hkey(t_due), sc, _i, …)` where `sc` **is** `_n_elig(p, gt)`. Eligibility is the
+**third** key, and `_hkey` ends in the exact cure timestamp — so two jobs essentially
+never tie and **scarcity never orders this queue, the deadline does**. A GT allowed on
+five machines and due an hour earlier takes a one-machine GT's only machine, and the
+pinned GT starves with nowhere to go.
+
+**Four PCR GTs have exactly one allowable machine, carrying 45,136 tyres = 11.4 % of July
+PCR demand.** `TBMPCR4` is the sole machine for `GT 1402 XPC TATA` + `GT 1412 XPC MM`
+(26,103 tyres) while **158,401 tyres of flexible demand also list it**; `TBMPCR3` carries
+`GT 1865 ROYL RENO` against 120,126 flexible; `TBMPCR9` carries `GT 2568 HT2` against
+88,834.
+
+**The fix under test:** `PLANNER_L7_PINNED_FIRST=B` (0 = off) rounds the deadline down to
+a **B-hour bucket** and orders **least-flexible-first inside the bucket**, keeping the
+true deadline and every existing term below it. It does **not** drop the deadline —
+this is a pull system and L5 has already fixed the cure times. Same bucketing shape as
+`SISTER_BUCKET_H` / `CLUSTER_SEQ_H`; the shipped key is **nested**, not replaced, so key
+arity stays homogeneous and at B = 0 the key is the shipped one.
+
+**Measured, July 2026, five fresh `main.py plan` arms in one invocation, one frozen July
+partition (sha1 `8a47e109e27d`, stamped 2026-07, CP-SAT OPTIMAL both plants), post-F1
+masters (`net_requirement` `41c8d601d747`). All arms `check_arm_fresh` FRESH.**
+
+| PCR | BUILT | ΔBUILT | in-month | ful% | tail | unfed | same% | wCO h | R5max | L11 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| B=0 | 389,949 | +0 | 384,621 | 96.8 | 10,806 | 8,312 | 83.7 | 552.0 | 71.9 | 31/48 |
+| B=4 | 390,440 | **+491** | 385,112 | 96.9 | 10,806 | 7,821 | 83.2 | 557.1 | 71.8 | 31/48 |
+| B=8 | 390,600 | **+651** | 385,272 | 97.0 | 10,806 | 7,661 | 82.9 | 553.1 | 70.6 | 31/48 |
+| B=24 | 391,048 | **+1,099** | 385,720 | 97.1 | 10,806 | 7,213 | 81.6 | 567.7 | 71.9 | 31/48 |
+
+| TBR | BUILT | ΔBUILT | in-month | ful% | tail | unfed | same% | wCO h | R5max | L11 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| B=0 | 96,318 | +0 | 94,095 | 96.6 | 3,540 | 2,625 | 100.0 | 174.3 | 71.8 | 31/48 |
+| B=4 | 96,555 | **+237** | 94,332 | 96.8 | 3,540 | 2,388 | 100.0 | 172.5 | 71.8 | 31/48 |
+| B=8 | 96,555 | **+237** | 94,332 | 96.8 | 3,540 | 2,388 | 100.0 | 173.2 | 71.8 | 31/48 |
+| B=24 | 96,204 | **−114** | 93,990 | 96.5 | 3,531 | 2,739 | 100.0 | 172.3 | 71.8 | 31/48 |
+
+**The tail is 10,806 PCR / 3,540 TBR in EVERY bucket arm, identical to base.** BUILT and
+in-month move together by the same amount with the tail pinned, so this is **not** the
+v14 / §4v relocation pattern. It creates output.
+
+**Where the tyres come from, exactly.** `GT 1865 ROYL RENO` (TBMPCR3-only) builds 2,244
+of 3,029 at B=0 and leaves **785 unfed — 26 % of its own requirement**. At every B ≥ 4 it
+builds **3,029 and leaves ZERO**. That single GT is the whole PCR gain at B=4.
+
+**And what it cannot touch — the more useful half.** The other three single-machine PCR
+GTs do not move one tyre at ANY bucket: `GT 1402 XPC TATA` 20,539 built / 176 unfed,
+`GT 2568 HT2` 15,364 / 172, `GT 1412 XPC MM` 4,942 / 239. Their residual starves as
+**`release_before_t0`** (PCR total 3,646 → 3,309 at B=8), i.e. the build would have to
+start before the month opens. **That is the ~4 h carry-in question — a PLANT RULING —
+and no queue order reaches it.** Do not re-tune this flag expecting to collect them.
+
+**B=24 is the trap.** Best PCR arm and a clean gate FAILURE: TBR BUILT −114, PCR
+same-size 83.7 → 81.6 pt while weighted changeover rises 552.0 → 567.7 h, and L7's own
+daily-mean-max prints **PCR 4,821 OVER the 4,800 G8 rail**. Mixed sign across plants
+fails however good the headline plant looks (DO-NOT #14).
+
+**The price at B=8, in one sentence:** +651 PCR / +237 TBR BUILT costs PCR same-size
+83.7 → 82.9 pt and PCR weighted changeover 552.0 → 553.1 h, with R5 max **improving**
+71.9 → 70.6 h and B12 sub-floor 0.00 % throughout.
+
+**Two rail bases disagree, so quote both.** L7's own check is clean on BOTH plants only
+at B=8 (PCR 4,753 / TBR 1,398); B=4 prints **TBR 1,401 OVER by one tyre** and B=24 prints
+PCR 4,821 OVER. `scripts/arm_kpi.py` recomputes the same quantity post-reconcile and
+disagrees by ~+85 PCR / −3 TBR (B=8: PCR 4,838, TBR 1,399) **against a BASE that is itself
+1,402, i.e. already over on TBR**. That spread is the known §1f pre-flight-vs-post-reconcile
+drift. **No arm changes any of the 48 L11 invariant statuses** — 31/48 in all four with
+the same 17 failures, and the PCR G8 *mean* stays BELOW its band (4,004 → 3,906), which is
+the intentional under-run, not a breach.
+
+**B = 0 is byte-identical to the pre-flag engine** on `build_schedule`, `cure_campaigns`,
+`gt_events`, `build_starved`, `cure_campaigns_reconciled`, `mould_changes` and
+`l11_invariants` — verified by reverting the file and running it as its own arm
+(`sc_pf0ref`), not by inspection.
+
+**NOT ADOPTED AS THE DEFAULT.** This is a one-month result and **July is the easy month**
+(its demand is the plant's own July output, 100 % achievable, no arithmetic ceiling). v12
+shipped two flags on a July-only A/B and v13 reverted both. **Run August through
+`scripts/ab_both_months.py` before moving this default.**
+
+**Not the same change as §4v.** EDD *dropped* the deadline at L5 and lost 3.8 pt. This
+keeps the deadline and reorders only inside a bucket at L7.
+
+### 4w.1 THE AUGUST GATE — RUN 2026-08-19. **B = 8 REJECTED. DEFAULT STAYS 0.**
+
+The outstanding call above, closed. Four fresh arms (`sc_apf0/4/8/24`), **one frozen
+August partition** (sha1 `8bcb10c113bf`, stamped 2026-08, CP-SAT OPTIMAL, 95 rows) whose
+provenance was **re-verified against the masters the arms themselves regenerate** — all
+five input sha1s (`net_requirement ca7b004f8744`, `cap_machine bba5249cd1d2`,
+`cap_ttl_groups 49787c6f2de0`, `gt_size f1ad3ad32766`, `allowed_machine_matrix
+144a8e1d3283`) equal before and after an L2/L4/L4.5 re-run, so no rebuild was needed and
+none happened (file mtime pre-dates every arm). Env `PLANNER_OPENING_GT=
+opening_gt_manual_2026-08.parquet`, `PLANNER_LOT_INTERVAL_H=8`,
+`PLANNER_TH_GT_WIP_RAIL_MARGIN=1.0`. All four **FRESH** under `check_arm_fresh.py`; all
+four `build_schedule.parquet` sha1s distinct; `cure_campaigns.parquet` **identical in all
+four**, the correct signature of an L7-only queue change.
+
+| PCR | BUILT | ΔBUILT | in-month | ful% | tail | unfed | starv | same% | wCO h | R5max | L11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| B=0 | 408,349 | +0 | 387,837 | 90.9 | 24,525 | 8,212 | 4,513 | 75.9 | 645.7 | 71.4 | 28/48 |
+| B=4 | 410,916 | **+2,567** | 389,116 | 91.2 | 25,813 | 5,645 | 1,946 | 76.7 | 645.9 | 71.7 | 29/48 |
+| B=8 | 410,752 | **+2,403** | 389,087 | 91.2 | 25,678 | 5,809 | 2,110 | 76.9 | 641.2 | 71.6 | 29/48 |
+| B=24 | 410,916 | **+2,567** | 389,116 | 91.2 | 25,813 | 5,645 | 1,946 | 75.9 | 632.4 | 72.0 | 29/48 |
+
+| TBR | BUILT | ΔBUILT | in-month | ful% | tail | unfed | starv | same% | wCO h | R5max | L11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| B=0 | 97,182 | +0 | 94,176 | 95.4 | 4,222 | 2,799 | 1,810 | 100.0 | 137.7 | 71.1 | 28/48 |
+| B=4 | 97,188 | **+6** | 94,187 | 95.4 | 4,217 | 2,793 | 1,804 | 100.0 | 136.0 | 65.6 | 29/48 |
+| B=8 | 97,104 | **−78** | 94,099 | 95.3 | 4,221 | 2,877 | 1,888 | 100.0 | 136.7 | 67.7 | 29/48 |
+| B=24 | 97,386 | **+204** | 94,396 | 95.6 | 4,206 | 2,595 | 1,606 | 100.0 | 133.2 | 66.8 | 29/48 |
+
+**The two-month verdict, per bucket — the only reading that decides:**
+
+| bucket | Jul PCR | Jul TBR | Aug PCR | Aug TBR | verdict |
+|---|---|---|---|---|---|
+| B=4 | +491 | +237 | +2,567 | **+6** | non-negative (TBR neutral, see below) |
+| B=8 | +651 | +237 | +2,403 | **−78** | **REJECT — sign flips by month** |
+| B=24 | +1,099 | **−114** | +2,567 | +204 | **REJECT — sign flips by month** |
+
+**B = 8 is rejected on two independent counts, either sufficient.**
+1. **TBR BUILT −78 on August against +237 on July.** A flag whose sign flips by month on
+   a plant is fitted to a month. This is the +0.6 / −0.5 pattern that cost v12 two flags.
+2. **It creates a NEW L11 FAILURE**: `TBR median GT wait vs tau*` **PASS → FAIL**
+   (5.05 h → 5.78 h). **No July arm moved any of the 48 statuses.** B=24 breaks the same
+   invariant (5.05 → 6.10 h).
+
+**THE L11 PASS COUNT IS A TRAP HERE.** Every bucket reads **28/48 → 29/48**, which looks
+like a strict improvement. At B=8 that is a *net* of three flips: PCR median GT wait
+FAIL→PASS, PCR throughput vs plant rate FAIL→PASS, **TBR median GT wait PASS→FAIL**. The
+aggregate rises while a TBR invariant goes red — the per-segment-regression-hidden-by-an-
+aggregate failure mode named in `EXPERT_AUDIT.md`. **Diff the status column, never the
+count.**
+
+**Rails (G8 daily-mean-max) — both bases, neither picked.** The §1f pre-flight-vs-post-
+reconcile spread is live (−67 … +64 here). **The August base is already OVER on both
+plants on both bases**, so no arm can be credited with "no breach"; read as movement only.
+
+| arm | L7 PCR | L7 TBR | `arm_kpi.py` PCR | `arm_kpi.py` TBR |
+|---|---|---|---|---|
+| B=0 | 4,845 OVER | 1,407 OVER | 4,852 OVER | 1,403 OVER |
+| B=4 | 4,841 OVER | 1,402 OVER | 4,848 OVER | 1,399 OK |
+| B=8 | **4,795 ok** | 1,402 OVER | **4,859 OVER** | 1,404 OVER |
+| B=24 | 4,830 OVER | 1,420 OVER | 4,763 OK | 1,410 OVER |
+
+**The two bases contradict each other on PCR for the single arm under decision** (B=8:
+L7 clean, `arm_kpi` over) — which is itself why the rail cannot carry this call.
+
+**Why August differs from July mechanically** — this is not a mystery result. August's PCR
+gain is ~4× July's and comes from a **different cause**: `r5_shelf_life` starvation
+collapses 2,592 → 0 (B=4) / 320 (B=8) while `release_before_t0` barely moves
+(1,921 → 1,946 / 1,790). July's gain was machine contention on `GT 1865 ROYL RENO`.
+August is a 99.5 %-loaded month, so reordering the queue changes **when green tyres wait**,
+and the **R5 72 h clock — not contention — is what was killing them**. That also explains
+the TBR cost: PCR pulls earlier, TBR green tyres wait longer, median GT wait crosses tau*
+and 78 tyres die.
+
+**B = 4 is the only bucket non-negative on both plants in both months**, but its August TBR
+movement is **+6 tyres = +0.006 pt**, an order of magnitude below `ab_both_months.py`'s own
+**0.05 pt** noise floor. The honest description is **PCR-positive, TBR-neutral**, not
+"positive on both". It is a **candidate for a separate adoption decision**, not a default
+this run is entitled to move. **Do not re-tune B until TBR passes** — that is retuning
+until the metric agrees.
+
+**`PLANNER_L7_PINNED_FIRST` default remains `0`.**
+
+---
+
+## 4x. MEASURED AND REJECTED (again): `HORIZON_MODE=strict` on July — it does not even relocate
+
+Run in the same invocation, same partition, same masters, as the honest counterweight to
+"make the tail go away".
+
+| | PCR B=0 | PCR strict | TBR B=0 | TBR strict |
+|---|---|---|---|---|
+| BUILT | 389,949 | **372,913 (−17,036)** | 96,318 | **91,129 (−5,189)** |
+| in-month | 384,621 | **377,265 (−7,356)** | 94,095 | **92,195 (−1,900)** |
+| ful% | 96.8 | 95.0 | 96.6 | 94.6 |
+| tail | 10,806 | 1,787 | 3,540 | 459 |
+| in-month+tail | 395,427 | **379,052 (−16,375)** | 97,635 | **92,654 (−4,981)** |
+| L11 | 31/48 | **28/48** | 31/48 | **28/48** |
+
+**This relocates output, it does not create it — and on July it does not even relocate
+it: in-month FALLS too.** The August precedent (v14) at least raised in-month while BUILT
+fell; here both fall on both plants, total real output falls 16,375 / 4,981, and three L11
+invariants flip to FAIL (`TBR mean GT inventory (G8)`, `TBR last-day GT inventory (G8)`,
+`TBR mould changes / press-day occupied`). `GT 1402 XPC TATA` alone loses **3,432 tyres**.
+Consistent with the v14 August sweep (`strict −30,572 BUILT`). The tail is real output the
+plant gets in the first days of the next month; deleting the horizon deletes the tyres.
+
+---
+
+## 4y. A FLAT, CAPPED DAILY CURE RATE — the SHAPE is constructible, the OUTPUT is not (2026-08-19)
+
+**Instruction under test.** *"Cure a flat 13,000/day on PCR and 3,200/day on TBR, flat from
+day 1, no month-end tail; finish demand inside the month and bank the surplus (≈4,500 PCR /
+≈1,200 TBR) as next month's opening GT."* 13,000 × 31 = 403,000 against 398,405 of July PCR
+demand. (The plant's own figure for TBR was 3,000/day; **substituted to 3,200** because
+3,000 × 31 = 93,000 is 5,020 *below* July TBR demand — it caps the plant under its
+requirement by construction. The 3,000 case was measured anyway, below.)
+
+**There was no daily rate governor in the engine at all.** `PLANNER_L5_TAKT` is a budget on
+concurrently *seated presses*, TBR-only by default, and re-measured inert on the current
+baseline (PCR byte-identical at every setting). So one was built: `PLANNER_L5_DAY_CAP=1`,
+cap values in `CONFIG.thresholds.cure_day_cap` (§8), ledger charged at `_takt_commit` — the
+one site every seat passes through. Default off; with the cap inert the layer is
+**byte-identical** to the shipped one (`cure_campaigns.parquet` md5 `35ca003f4c5c…` on both).
+
+### 4y.1 The result
+
+Arms fresh via `scripts/run_arm.py`, gated by `check_arm_fresh.py`. July partition rebuilt
+for the month (`cpsat_partition.py 2026-07`, PCR **OPTIMAL** obj 1,044 in 773 s, sha1
+`8a47e109e27d`); August on the stored `8bcb10c113bf`. `PLANNER_CARRY_IN` off on both months
+(`masters/carry_in/` does not exist). `floor` = `PLANNER_L5_FLOOR_BASIS=lot`.
+
+| | Jul PCR BUILT | dBUILT | Jul PCR in-month | Aug PCR BUILT | dBUILT | Aug PCR in-month |
+|---|---|---|---|---|---|---|
+| base | 387,098 | +0 | 381,854 (96.1 %) | 407,125 | +0 | 386,447 (90.6 %) |
+| cap | 388,519 | **+1,421** | 380,490 (95.8 %) | 403,689 | **−3,436** | 380,662 (89.2 %) |
+| floor | 383,686 | −3,412 | 380,528 (95.8 %) | 404,220 | −2,905 | 384,945 (90.2 %) |
+| cap+floor | 385,069 | **−2,029** | 378,765 (95.3 %) | 401,506 | **−5,619** | 380,424 (89.2 %) |
+
+| | Jul TBR BUILT | dBUILT | Jul TBR in-month | Aug TBR BUILT | dBUILT | Aug TBR in-month |
+|---|---|---|---|---|---|---|
+| base | 95,312 | +0 | 93,107 (95.6 %) | 97,211 | +0 | 94,188 (95.4 %) |
+| cap | 95,312 | **+0** | 93,107 (95.6 %) | 97,211 | **+0** | 94,188 (95.4 %) |
+| floor | 95,458 | +146 | 93,643 (96.1 %) | 96,931 | −280 | 94,299 (95.5 %) |
+| cap+floor | 95,458 | +146 | 93,643 (96.1 %) | 96,931 | −280 | 94,299 (95.5 %) |
+
+Shape, from the governor's own scheduled-cure ledger (L11 is the whole-run count):
+
+| arm | Jul PCR CV / day 1 | Aug PCR CV / day 1 | Jul TBR CV / day 1 | L11 Jul \| Aug |
+|---|---|---|---|---|
+| base | 0.0891 / 7,813 | 0.0956 / 7,251 | 0.0547 / 2,278 | 32 \| 28 of 48 |
+| cap | 0.0830 / 7,748 | 0.0832 / 7,102 | 0.0547 / 2,278 | 32 \| 29 |
+| floor | 0.0666 / 10,871 | 0.0623 / 10,705 | 0.0377 / 2,695 | 33 \| 30 |
+| cap+floor | **0.0531** / 10,717 | **0.0460** / 10,295 | **0.0377** / 2,695 | 31 \| 29 |
+
+**REJECTED.** The cap alone is **+1,421 BUILT on July PCR and −3,436 on August PCR** —
+mixed sign across months, which fails the gate on its own. The coupled arm is negative on
+both months. TBR is **byte-identical to base at 3,200/day on both months**: that is the cap
+never binding, not the cap being safe.
+
+### 4y.2 The hypothesis this existed to test, and its refutation
+
+Every previous attempt to lower the day-1 release wall lost tyres (`WARM_RELEASE` −1,319,
+`T0_STOCK_BASIS=lot` −1,670, `FLOOR_BASIS` min/slice −2,478…−6,050, `CHG_PARALLEL` −3,665),
+and the recorded reason is that **the wall protects building's lead time**. The new argument
+was that capping the cure rate *below* the fleet maximum leaves building slack to catch up,
+so the wall could finally come down safely. That is a claim about an **interaction**, and it
+is measurable directly:
+
+| | cap alone | floor alone | additive prediction | measured cap+floor | interaction |
+|---|---|---|---|---|---|
+| July PCR | +1,421 | −3,412 | −1,991 | **−2,029** | −38 (−0.01 %) |
+| Aug PCR | −3,436 | −2,905 | −6,341 | **−5,619** | +722 (+0.18 %) |
+
+**The two effects are additive to within ±0.2 % of BUILT and the interaction flips sign.**
+There is no coupling. A ceiling on the cure *rate* does not shorten a lead *time*.
+
+### 4y.3 Three structural reasons, before any tuning
+
+1. **A cap is a ceiling and day 1 is a floor problem.** Day-1 cure is 7,813 (Jul) / 7,251
+   (Aug) because of `earliest_cure`'s 11.86 h wall. No ceiling raises it. Only `FLOOR_BASIS`
+   does, and even at the *physical* 2.35 h lot floor day 1 reaches 10,717 / 10,295 — still
+   18–21 % short of 13,000, the remainder being day-1 mould changes.
+2. **Flatness is bought with the tail the instruction forbids.** The governor levels by
+   pushing seats right, and right eventually means out of the month. July PCR campaigns
+   crossing month end: base 134 (54,195 tyres) → cap 142 (61,059) → a 12,300/day arm 163
+   (73,876); tail 10,339 → 13,044 → 20,480. *Flat* and *no tail* are opposed under this
+   mechanism, not complementary. The flattest curve measured (12,300/day + floor, PCR
+   scheduled CV **0.0322**) costs 13,309 tyres of in-month fulfilment (96.1 → 92.8 %).
+3. **The requested numbers straddle the plant's own ceiling in opposite directions.** L5
+   seats July PCR in **63,499 press-h of 63,984 available = 99.2 % press utilisation**, and
+   the already-full days sit at **13,228/day**. 13,000 is 98.3 % of that — it binds on
+   **2 seats** — so "13,000 × 31 = 403,000" is arithmetic about a day-1 the plant does not
+   have. TBR's plateau is **3,186/day**, so 3,200 never binds at all.
+   The originally requested TBR **3,000/day**, measured: BUILT −8, but in-month
+   93,107 → **90,077** and tail 3,522 → **6,398**. It does not destroy tyres, it **relocates
+   ~3,000 of them into next month** — the §1 relocation signature, read correctly only
+   because BUILT was reported beside in-month.
+
+### 4y.4 The two safety numbers
+
+R5 (72 h hard) degrades with flatness — July PCR GT wait max **62.3 h base → 68.4 h cap →
+70.2 h cap+floor**; a flatter cure curve holds green tyres longer, and 70.2 leaves 1.8 h.
+The GT WIP rail held on every arm (PCR daily-mean max 4,557–4,669 vs 4,800; TBR 1,311–1,327
+vs 1,400), so nothing here was bought by breaching G8.
+
+### 4y.5 What the instruction's *other* half costs
+
+The banked-surplus target (≈4,500 PCR of next-month opening GT) is in direct conflict with
+finishing demand in-month at 99.2 % press utilisation. Month-end carry-forward GT measured:
+base **1,486**, cap 1,340, cap+floor 1,011, and the only arm that approaches the target
+(12,300/day + floor, **3,346**) does so by giving up 13,309 in-month cures. At this press
+loading the plant cannot both satisfy July and hand August a 4,500-tyre float; that is a
+capacity ruling, not a scheduling one.
+
+---
+
+## 4z. OPENING-STOCK FIRST IN THE L5 SEAT QUEUE — every stated objective moves the right way and BUILT falls on both plants (2026-08-19)
+
+**Target under test.** Day-1 cure ≥ 13,000 PCR / ≥ 3,000 TBR. Base `runs/sc_pf8` (July,
+`PLANNER_L7_PINNED_FIRST=8`): PCR day-1 **7,813** against a day-2-onward mean of 12,692;
+TBR day-1 **2,278** against 3,111. Short 5,187 / 722.
+
+### 4z.1 The defect is real, and it is NOT changeover
+
+Day-1 PCR press time is 2,064 press-hours: **1,216 h curing, 0 h mould change, 848 h idle**.
+Sixty of 86 presses do not start at hour 0, median wait 14.1 h. `earliest_cure` already
+returns `t0` for a GT holding `>= gap_q` of opening stock — but **which** campaign reaches a
+press first is decided by the L5 job sort, which is pure `-qty`. A large stockless campaign
+(floor 11.86 h on PCR) outranks a smaller stocked one and takes the opening seat.
+
+Measured on `runs/sc_pf8` **before writing any code**, and this is the number that justified
+building the flag at all:
+
+| | PCR | TBR |
+|---|---|---|
+| t0 seats the opening stock **pays for** (Σ ⌊stock/gap_q⌋) | **57** | **64** |
+| campaigns actually seated at t0 | 26 | 34 |
+| **unclaimed paid seats** | **31** | **30** |
+| late-starting presses whose first GT holds ≥ gap_q | 38 of 60 | 24 of 45 |
+| opening stock never consumed at all | 468 | 231 |
+
+### 4z.2 The change
+
+`PLANNER_L5_STOCK_FIRST=1` (ships **0**) promotes to the head of the queue only those
+campaigns the opening stock can actually pay a t0 seat for —
+`min(⌊stock/gap_q⌋, moulds (R3), eligible presses)` per GT — keeping `-qty` inside the head
+and untouched from the first unpaid job onward. On July that is 54 of 276 PCR jobs and 54 of
+195 TBR. **`-qty` was not displaced globally**: `PLANNER_D1_DEPTH` did that and lost 11.9 pt,
+`PLANNER_L5_EDD` prefixed it and lost 3.8 pt (§4v).
+
+`gap_q` was extracted into one function `gap_q_of()` read by both `earliest_cure` and the
+promotion, because the debit site had already priced this in the wrong currency once. With
+the flag off the engine is **byte-identical** — `cure_campaigns`, `build_schedule`,
+`gt_events` and `l11_invariants` all sha1-match `runs/sc_pf8`, which predates the edit.
+
+### 4z.3 The result — fresh arms, `scripts/arm_scorecard.py`, partition `8a47e109e27d` (2026-07), `check_arm_fresh` clean
+
+| | PCR base | PCR sf1 | TBR base | TBR sf1 |
+|---|---|---|---|---|
+| **day-1 cure** | 7,813 | **9,076 (+1,263)** | 2,278 | **2,479 (+201)** |
+| day-2 | 13,228 | **13,043** | 3,186 | **3,007** |
+| day-2-onward mean | 12,692 | **12,662** | 3,111 | **3,086** |
+| daily mean | 12,535 | 12,546 | 3,084 | **3,066** |
+| **BUILT** | 390,600 | **386,263 (−4,337)** | 96,555 | **95,956 (−599)** |
+| in-month | 385,272 | 381,841 | 94,332 | 93,543 |
+| ful% | 97.0 | 96.1 | 96.8 | 96.0 |
+| tail | 10,806 | 10,121 | 3,540 | 4,020 |
+| unfed | 7,661 | **12,196** | 2,388 | 2,885 |
+| starved | 3,309 | **7,400** | 1,322 | 1,634 |
+| opening stock unused | 468 | **24** | 231 | **46** |
+| same-size (L11 / `arm_kpi`) | 81.3 / 82.9 % | 81.0 / 82.7 % | 100.0 / 100.0 % | 100.0 / 100.0 % |
+| weighted CO min/machine-day | 87.9 | 85.8 | 34.3 | 33.6 |
+| weighted setup h (`arm_kpi`) | 553.1 | 542.3 | 173.2 | 173.8 |
+| **G8 daily-mean max — L7 basis** | 4,753 | **4,799** (rail 4,800) | 1,398 | **1,407 — OVER 1,400** |
+| **G8 daily-mean max — `arm_kpi` basis** | 4,838 | 4,851 (already over in base) | 1,399 | 1,399 — under |
+| GT inventory, time-weighted mean | 3,725 | 3,696 | 1,224 | 1,189 |
+| sub-floor run share | 0.0 % | 0.0 % | 0.0 % | 0.0 % |
+| lot p50 | 304 | 304 | 80 | 80 |
+| R5 max | 70.6 h | **71.9 h** (hard 72) | 71.8 h | 68.6 h |
+| L11 | 31/48 | 31/48 | 31/48 | 31/48 |
+
+**Print both G8 bases — they disagree and the disagreement is load-bearing here.** On L7's
+basis TBR goes 1,398 → **1,407, over the 1,400 rail**; on `arm_kpi`'s it is 1,399 → 1,399,
+under it, while PCR is *already* over on `arm_kpi`'s basis in the base arm. Neither number is
+quotable alone. L11's own gate resolves it against the flag: `TBR last-day GT inventory (G8)`
+goes PASS → FAIL.
+
+**Day-1 cure rises while BUILT falls on both plants. That is relocation, not creation** — and
+it is worse than relocation, because the tyres do not reappear later either: day 2 falls on
+both plants, the day-2-onward mean falls on both, and the PCR daily mean moves **+11 on a
+12,535 base while total output drops 4,337**. Day-1 was bought from days 2–31 *and* from the
+month. It also never reaches the target: 9,076 against 13,000.
+
+### 4z.4 The mechanism of the loss — and the pre-measurement claim it refutes
+
+The flag does everything it was designed to do. t0 seats PCR 26 → 32 and TBR 34 → 50; late
+presses PCR 60 → 54 and TBR 45 → 29; the 699 tyres of expiring opening stock become **70**.
+
+The design note written *before* measuring argued this was "not another early-release
+experiment" because `earliest_cure` is untouched and every promoted campaign was already
+legal. **Per campaign that is true. In aggregate it is false.** The t0 window is a *shared
+build-feed resource*: seating more campaigns in it oversubscribes building's day-1 output no
+matter how each individual seat was justified.
+
+| starvation cause, PCR | base | sf1 |
+|---|---|---|
+| `release_before_t0` | 3,309 | **6,889** |
+| `r5_shelf_life` | **0** | **511** |
+| total | 3,309 | 7,400 |
+| — of which on the **promoted** GTs | 3,015 | **7,400 (100 %)** |
+
+A promoted campaign burns its `gap_q` of stock in the first hours, then needs fresh green
+that cannot be released before `t0`. **Identical signature to `PLANNER_L5_WARM_RELEASE`**
+(−1,319 PCR, "+1,400 of it on the warm GTs themselves"). Fifth member of that family after
+`FLOOR_BASIS` min/slice (−2,478…−6,050), `CHG_PARALLEL` (−3,665), `WARM_RELEASE` (−1,319)
+and `T0_STOCK_BASIS=lot` (−1,670).
+
+### 4z.5 Two further readings
+
+**An unchanged L11 pass COUNT is not an unchanged plan.** 31/48 in both arms, yet two
+invariants flip: `TBR last-day GT inventory (G8)` PASS → FAIL and `PCR same-day build/cure
+correlation` FAIL → PASS. Diff the status column — the same trap §4w.1 records.
+
+**August was not run.** The ship gate is non-negative BUILT on both plants on both months;
+July fails it on both plants, so August could only confirm a decision already made.
+
+### 4z.6 Verdict
+
+**Default stays `0`.** The experiment is kept in the code, gated off, with its numbers. The
+699 tyres of expiring opening stock are real waste and this flag does collect 629 of them —
+it just costs **4,936 tyres of BUILT** to do it. **Day-1 curing is not limited by the cure
+seat queue; it is limited by what building can release in the first ~12 hours.** Any further
+attempt at this target must move that boundary, and every attempt to move it so far has lost.
+Re-measure both months if the day-1 build feed ever changes.
+
+---
+
+## 4aa PLANT HOLIDAYS — a closed plant-day, IMPLEMENTED and measured (2026-08-20)
+
+Rule **G3** shipped "Blocked — calendar assumed 24×7". The engine had no notion of
+time-phased availability anywhere: press downtime was a scalar haircut on the cure
+*rate*, never a hole in the *calendar*. This adds one.
+
+`planner/cmbc/holiday.py` is the single source. A holiday is a **plant-day**,
+`07:00 → 07:00` — 15 August closed means `[2026-08-15 07:00, 2026-08-16 07:00)`.
+Configured from `masters/holidays_<month>.json` (resolved by `planner/paths.holidays`)
+or `PLANNER_HOLIDAYS=2026-08-15`, per-plant with `PCR:`/`TBR:`. **Absent file + unset
+env => every function is the identity => byte-identical**, verified by diffing sha1s on
+all 14 parquets of a fresh arm, twice.
+
+### 4aa.1 Two models, deliberately, because the two resources differ
+
+| layer | model | why |
+|---|---|---|
+| **L5** (presses) | **PAUSE**. `free[press]` is one instant, not an interval list, so the hole is expressed as arithmetic: `add_work` spends press-hours *through* the calendar. A campaign meeting the closure keeps its press-hours and its wall-clock end moves +24 h. | A cure campaign is 8-11 days. Pushing it wholly before or after a closure is not a schedule, it is a deletion. |
+| **L7** (build machines) | **BLOCK**. The closure is booked into `busy[mach]` as a pre-booked interval with sentinel GT `__PLANT_HOLIDAY__` (`_setup_s` returns 0 for it — a shutdown is not a changeover). The existing setup-aware backward walk then pushes any straddling run to end at 07:00. | A build run is `build_band` hours. The floor does not leave half a run in a machine over a shutdown. |
+
+**Three places had to be repaired that the two models do not cover**, and each is a
+distinct class:
+
+1. `_make_room` **rebuilds** `busy[mach]` from `placed`, which holds only real runs —
+   a naive rebuild silently *deletes* the booked closure. It also compacts incumbents
+   *earlier*, which is precisely how a run lands inside one. Both snap through
+   `holiday.fit_before`. (Cf. §6 item 25, in mirror form: a table you write and then
+   overwrite.)
+2. `L10.spread()` apportioned campaign qty on the **wall clock**. Left alone it credits
+   the closed day with `rate x 24` tyres *and* dilutes every other shift of that
+   campaign by the same factor — the visible symptom is not the holiday, it is **the
+   neighbours sagging**. The denominator is now working seconds; a closed shift is
+   emitted with qty 0 so the day is present-and-zero, never missing.
+3. **L7 phase 1's `t_cure`** — see 4aa.3, the one that got through.
+
+### 4aa.2 The measurement — August 2026, fresh arms, partition `8bcb10c113bf` (2026-08)
+
+Baseline: press availability 1.0, load/unload 2.5/2.5 (plant instruction 2026-08-19).
+`HOLbase` defaults, `HOLhol` `PLANNER_HOLIDAYS=2026-08-15`. Both `check_arm_fresh` FRESH.
+
+**`BUILT` and `BUILTinm` disagree in sign, and that is the trap.** `BUILT` (the
+`arm_scorecard.py` definition) sums the whole planning window — month **plus the 72 h
+`HORIZON_MODE=extend` tail** — so a plan that shifts right keeps its tyres. `BUILTinm`
+restricts to slices finishing before 1 Sep 07:00. A closure moves work rightward, so
+this is exactly the change for which the two separate. Quoting only `BUILT` reports a
+closed plant-day as free.
+
+| plant | arm | BUILT | dBUILT | BUILTinm | dBinm | fed inm | tail | starved | R5 max | L11 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| PCR | HOLbase | 400,467 | +0 | 399,636 | +0 | 402,874 | 2,825 | 21,705 | 64.2 h | 28/48 |
+| PCR | HOLhol | 400,674 | **+207** | 398,349 | **-1,287** | 400,668 | 5,263 | 21,483 | **69.0 h** | 29/48 |
+| TBR | HOLbase | 97,741 | +0 | 97,741 | +0 | 98,480 | 462 | 1,848 | 61.2 h | 28/48 |
+| TBR | HOLhol | 97,381 | **-360** | 97,239 | **-502** | 98,227 | 461 | 2,196 | **69.3 h** | 29/48 |
+
+BUILT/demand PCR 93.9 -> 93.9 %, TBR 99.0 -> 98.6 %. BUILTinm/demand PCR 93.7 -> 93.4 %,
+TBR 99.0 -> 98.5 %. fed/demand PCR 94.4 -> 93.9 %, TBR 99.7 -> 99.5 %.
+GT inventory time-weighted mean / daily-mean max vs rail: PCR 3,546 -> 3,614, 4,612 ->
+4,596 vs 4,800; TBR 1,142 -> 1,119, 1,320 -> 1,312 vs 1,400.
+**L11 gains one invariant on each plant** (TBR same-day build/cure correlation
+0.805 -> 0.939); nothing goes PASS -> FAIL. `verify_export.py`: **HARD 0, SOFT 0,
+EXPORT 0**.
+
+**Enforcement, re-derived from the parquets without importing the module:** build
+slices overlapping the window 196 (411.7 machine-h) -> **0**; tyres built on plant-day
+15 17,017 -> **0**; tyres cured 17,958.9 -> **0**; mould-change *work* inside the window
+9 changes -> **0 minutes** (3 changes span it and pause — `span - blocked == minutes`
+exactly). 147 cure campaigns span the closure and pause: that is the design.
+
+**No dip, and it is checked.** PCR cure days 1-14 are identical *to the tyre*, day 15 is
+0, days 16-31 are base's 15-30 shifted right one day — a pure translation. TBR cure is
+identical on days 1-3 and higher on every other day. Interior (d2-d29, holiday excluded)
+CV **falls on all four series**: PCR build 0.1241 -> 0.0784, PCR cure 0.0761 -> 0.0671,
+TBR build 0.0453 -> 0.0434, TBR cure 0.0237 -> 0.0227. **The one real residual is day
+14**, the shift running into the closure: PCR 12,932 built against an interior mean of
+13,875 (-6.8 %), TBR 3,088 against 3,419 (-9.7 %). That is the blocking model paying for
+itself — a run that cannot *finish* before 07:00 is pulled wholly before it and leaves a
+sliver no legal run fits. One shift, one day, named rather than smoothed.
+
+### 4aa.3 THE DEFECT THIS CAUGHT IN ITS OWN FIRST IMPLEMENTATION
+
+L5 and L10 were made holiday-aware and both looked clean: `cure_by_shift` read
+0 / 14,623 / 14,631 across days 15/16/17. **The exported pack did not.** Sheet
+`7_daily_summary` read **5,766 cured on the closed day** and 10,094 / 13,091 on the two
+after, against ~14,600 either side. The export buckets on the per-slice **`cure_ts`**,
+which L7 phase 1 interpolated linearly across the campaign's **wall-clock** span — and a
+paused campaign's span is 24 h longer than the press-hours it draws. So the draw was
+spread into the shut window and diluted everything around it: exactly the
+"neighbours sag" symptom, arriving through the one path that does not go through
+`cure_by_shift`. `cure_ts` is not a reporting column — `gt_events` uses it as the -qty
+instant, `_cap_ok` prices the WIP rail from it, and R5 is measured to it.
+
+The unfixed arm scored **PCR -8,317 BUILT and L11 28 -> 27**. After the fix: **+207 /
+-1,287 in-month, L11 28 -> 29.** *Almost the entire apparent cost of the holiday was my
+own bug.* **The only reason it was found is that two artefacts describing the same plan
+disagreed.** Do not collapse them into one view, and do not accept a layer-level artefact
+as proof — take the change all the way to `verify_export.py` on an exported pack.
+
+### 4aa.4 Why the cost is far below one day — READ BEFORE QUOTING THE NUMBER
+
+The closure removes 13,704 PCR / 3,313 TBR tyres of scheduled output; in-month BUILT
+falls 1,287 / 502, i.e. **91 % / 85 % comes back**. It comes back from exactly one place:
+August's base plan already tapers over its last three days — PCR builds 9,614 across
+d29-31 against an interior rate of ~13,600/day, ~31,000 tyres of idle build capacity —
+and the holiday shifts work into that hole (PCR d29-31 9,614 -> 19,738, **+10,124**).
+**A closure is not cheap; this month happens to have an empty shelf at the end to put the
+day on.** On a month whose plan runs flat to day 31, or under a horizon ruling that
+closes the box, the same closure costs close to a full day. Do not generalise 1,287.
+
+### 4aa.5 The real cost is R5, not volume
+
+GT wait max PCR 64.2 -> **69.0 h**, TBR 61.2 -> **69.3 h**, against a **hard 72 h**.
+Green tyres age through a shutdown at the same rate as anywhere else, so the closure
+spends 3.0 h / 2.7 h of the remaining shelf-life margin. **A second consecutive closed
+day, or this one in a month with less slack, breaches R5 — and R5 volume is lost, not
+delayed.** That is the number to watch. It is also why consecutive holidays are *merged*
+into one window rather than kept as two: `add_work` steps out of one window at a time.
+
+### 4aa.6 Known scope limits — stated, not hidden
+
+* `plan_h` / `cap_h` / `l2_ttl.LOAD_CAP` / `PLANNER_PART_UTIL` are all fractions **of
+  calendar hours** and none of them subtract a closure. They are pre-flight capacity
+  *estimates*; actual placement is gated by the booked intervals, so the effect is that
+  those estimates read ~3 % optimistic on a month with one holiday. Two of them live
+  outside `config.py` (§8).
+* The engine is still 24x7 **within** an open plant-day. Sub-day shift rosters and
+  per-machine PM windows remain G3-blocked.
+* L11's `same-day build/cure correlation` is computed on the **wall-clock date**, not the
+  plant day, unlike everything else in the engine. A 07:00 boundary splits one wall-clock
+  date across an open and a closed plant-day, and on the *unfixed* arm this alone read
+  0.899 vs 0.949 on the plant-day basis. It is a pre-existing basis defect that a closure
+  makes visible; **not fixed here, because fixing it moves the base arm too** and that is
+  a separate measurement. Recorded so the next reader does not rediscover it.
+
+---
+
 ## 5. FLAGS — the measured trade frontier
 
 | flag | default | effect |
@@ -2210,6 +2889,8 @@ but there is 0.7 h of headroom — re-check it on any month where this is armed.
 | `PLANNER_CLUSTER_SEQ_H` | **`4`** | deadline bucket bounding the reorder. **Single-peaked at 4 on both months on TBR.** 24 costs −0.55 Jul TBR |
 | `PLANNER_CLUSTER_SEQ_PLANTS` | **`TBR`** | adding PCR costs −0.62 Jul / −0.73 Aug and does not even raise PCR cluster adjacency |
 | `PLANNER_CLUSTER_PLANTS` | **`PCR,TBR`** | scopes `CLUSTER_BUCKET_H`. `TBR` makes PCR **bit-identical** to base — verified on every arm. Out-of-scope plants get the sentinel `"~"` INSIDE the key tuple, never a different key shape: a bare `datetime` beside a tuple would make `heapq` compare across types and raise |
+| `PLANNER_L7_PINNED_FIRST` | **`0`** | **most-constrained-first in the L7 placement heap (§4w).** `B` = deadline bucket in hours; least-flexible-first inside the bucket, deadline kept below it. **July: B=8 is +651 PCR / +237 TBR BUILT with the tail UNCHANGED (10,806 / 3,540), 0 L11 status flips, R5 max 71.9 → 70.6 h** — the gain is `GT 1865 ROYL RENO` (TBMPCR3-only) going 785 unfed → **0**. Costs PCR same-size 83.7 → 82.9 pt and weighted CO 552.0 → 553.1 h. **B=24 FAILS the two-plant gate (TBR −114, PCR rail 4,821 OVER).** `0` is byte-identical to the pre-flag engine (verified, not asserted). **AUGUST GATE RUN 2026-08-19 (§4w.1): B=8 REJECTED — Aug PCR +2,403 but Aug TBR −78, a SIGN FLIP against July's +237, and it turns `TBR median GT wait vs tau*` PASS → FAIL (an invariant no July arm moved). The L11 pass count rises 28 → 29 at every bucket and HIDES that regression — diff the status column, not the count. B=24 also rejected (flips the same TBR invariant). B=4 is the only two-month non-negative bucket, but Aug TBR is +6 tyres = +0.006 pt, below the 0.05 pt noise floor: PCR-positive, TBR-NEUTRAL, a candidate not a default. DEFAULT STAYS `0`** |
+| `PLANNER_L5_STOCK_FIRST` | **`0`** | **opening-stock-first in the L5 seat queue (§4z).** Promotes only the campaigns the opening stock pays a t0 seat for (`min(⌊stock/gap_q⌋, moulds, eligible presses)`), `-qty` kept everywhere else. **MEASURED AND REJECTED on July, both plants: day-1 cure +1,263 PCR / +201 TBR and opening stock left to expire 699 → 70, but BUILT −4,337 PCR / −599 TBR, day 2 and day-2-onward mean FALL on both plants, starvation PCR 3,309 → 7,400 with 100 % of it on the promoted GTs, G8 TBR daymax 1,407 over the 1,400 rail and PCR R5 max 71.9 h of 72.** Day-1 rising while BUILT falls is relocation. `0` is byte-identical to the pre-flag engine (verified against `runs/sc_pf8`, not asserted) |
 | `PLANNER_PART_SEED` | **`""`** | `wb` seeds `build_gt_machine_partition.py` tier 0 from the workbook's `Assigned_Machine` (§4s.6). Mixed sign: PCR −0.74 Jul / +0.24 Aug; with `PARTITION_PLANTS=PCR,TBR` TBR −1.71 Jul / +1.16 Aug. It is 93 %/84 % identical to `gt_home_machine`, i.e. near the twice-rejected pin — hence a seed guarded by the existing free-hours test, never the partition itself |
 | `PLANNER_PARTITION_PLANTS` | `PCR` | `""` disables (95.8 % ful, same-size 82 %); `PCR,TBR` enables TBR |
 | `PLANNER_TAU_RELEASE` | `min` | `star` restores the §1a bug. Do not. |
@@ -2217,7 +2898,7 @@ but there is 0.7 h of headroom — re-check it on any month where this is armed.
 | `PLANNER_HARD_FLOOR` | `budget` | `1` = absolute gate (§1b bug), `off` = no floor (fragments) |
 | `PLANNER_PART_SPLIT_H` | `250` | `0` = never split big GTs → 1.02 machines/GT, *stricter than the plant's 1.40*, and −1.3 pt |
 | `PLANNER_SLICE_MULT_PCR` / `_TBR` | `2.0` / `3.0` | **the run-size lever — see the frontier in §4g.** `3.5/8.0` closes all three remaining gaps and beats the plant on setup for −3.9 pt; `4.5/8.0` beats the plant on every changeover metric for −7.6 pt |
-| `PLANNER_PART_UTIL` | `0.95` | lowering trades same-size back for fulfilment; 0.80 gives 88.8 % / 94.0 % |
+| `PLANNER_PART_UTIL` | `0.95` | lowering trades same-size back for fulfilment; 0.80 gives 88.8 % / 94.0 % — **measured on the GREEDY builder. It was INERT from 2026-08-17 (when CP-SAT became the default builder and did not read it) until 2026-08-18, when `cpsat_partition.py` was made to read it. The 0.80 figures have not been re-measured on CP-SAT.** |
 | `PLANNER_LOT_INTERVAL_H` | `16` | `24` beats the plant on setup (324 vs 344 h) for −0.7 pt; does NOT move run p50 or the min_lot refusal (§4c) |
 | `PLANNER_RAIL_MARGIN` | `0.94` | headroom so the stated cap survives reconciliation (§1f). `1.0` leaks 3 (PCR) / 14 (TBR) tyres over |
 | `PLANNER_WIP_RAIL_PCR` / `_TBR` | `4800` / `1400` | **tighter than the plant** (its time-weighted daily max is 5,379 / 1,272) |
@@ -2230,6 +2911,7 @@ but there is 0.7 h of headroom — re-check it on any month where this is armed.
 | `PLANNER_FULL_AVAIL_LADDER` | *(follows above)* | L7 exact per-tyre shelf-life ladder replacing the MEDIAN-age screen. **REJECTED.** Stock draw is identical to the tyre in every arm — the median was never binding — and reshuffling costs −0.09/−0.13 pt PCR (§4p.3) |
 | `PLANNER_B16_CRITERION` | `coverage` | `gt` restores the one-sided search (§4k). `machine` = binary dead-machine test; `coverage` adds the fair-share deficit. Worth **+16.7 pt May / +18.8 pt Aug TBR, -1.2 pt Jul** |
 | `--lookahead-days` (L4) | `0` | appends N days of month M+1 demand so building has something to pull at month end (§4j.6). **No-op on July 2026: `demand_2026-08.parquet` cannot exist** — demand is derived from cured MES and MES ends 2026-07-31 |
+| `PLANNER_HOLIDAYS` | *(unset)* | plant-day CLOSURES, rule G3 (§4aa). `2026-08-15`, or `PCR:2026-08-15,TBR:2026-08-16`. Falls back to `masters/holidays_<month>.json`. **Absent + unset is BYTE-IDENTICAL on all 14 arm parquets** (verified twice). Aug 2026, one closed day: in-month BUILT **PCR -1,287 / TBR -502**, L11 **28 -> 29 both plants**, verify_export 0/0/0 — but **R5 max 64.2 -> 69.0 h PCR / 61.2 -> 69.3 h TBR against a hard 72**, which is the binding cost, not volume |
 
 ---
 
@@ -2369,6 +3051,44 @@ but there is 0.7 h of headroom — re-check it on any month where this is armed.
     tyres** in all four plant-months, because the screen never bound. Measure
     the counterfactual draw first; a wrong-shaped rule that never fires costs
     nothing to leave alone (§4p.3).
+37. **"Every campaign I moved was already legal" does not make a change safe.**
+    `STOCK_FIRST` promoted only campaigns `earliest_cure` would itself have
+    seated at `t0`, so per campaign nothing was released early — and BUILT still
+    fell 4,337 / 599 because the `t0` window is a **shared build-feed resource**
+    and seating more campaigns in it oversubscribes day-1 building output.
+    100 % of the extra starvation landed on the promoted GTs themselves.
+    Per-item legality is not an aggregate feasibility argument; the shared
+    resource is (§4z.4). Fifth loss in the early-release family.
+38. **Day-1 (or any single-day) cure is not an objective you can optimise
+    directly.** Every lever that raises it moves press seats earlier, and press
+    seats earlier means less build lead time, which costs more than the day
+    gains: `STOCK_FIRST` +1,263 day-1 PCR for −4,337 BUILT (§4z), `EDD` (§4v),
+    `BACKLOAD`, `WARM_RELEASE`, `CHG_PARALLEL`, `FLOOR_BASIS`. **The binding
+    constraint on day 1 is what building can release in the first ~12 h, not
+    which campaign holds the press.** Fix that boundary or do not fix this.
+
+39. **Do not accept a layer artefact as proof that a change worked — take it to
+    the exported pack.** The holiday feature was clean in `cure_by_shift`
+    (0 / 14,623 / 14,631 across the closure) while the exported
+    `7_daily_summary` read **5,766 tyres cured on a shut plant-day** and sagged
+    the two days after it. The two views come from different columns — L10's
+    own spread vs the per-slice `cure_ts` — and only their DISAGREEMENT found
+    it (§4aa.3). Two views of one plan is a feature; collapsing them is how a
+    defect ships.
+
+40. **A duration is not a span once the calendar has holes in it.** Anything of
+    the form `start + hours` or `qty * hours/total` is wall-clock arithmetic and
+    silently credits closed time with output. The three that bit: L5's campaign
+    end, L10's `spread()` denominator, and L7 phase 1's `t_cure` interpolation.
+    `planner/cmbc/holiday.py` is the only place this arithmetic lives — do not
+    re-derive it at a call site. Note that **R5 is the exception and must stay
+    wall-clock**: a green tyre ages through a shutdown (§4aa.5).
+
+41. **A blocked interval you write into a shared structure can be erased by a
+    consumer that rebuilds it.** `_make_room` reconstructs `busy[mach]` from
+    `placed`, which holds only real runs, so a booked closure vanishes and every
+    later `_place` on that machine is free to schedule into a shut plant. Grep
+    for every ASSIGNMENT to the structure, not just the reads (§4aa.1).
 
 ---
 
@@ -2410,11 +3130,15 @@ the specific lines before treating a failure as a regression.
 | cap | defined in | value | read by |
 |---|---|---|---|
 | **lot floor (B12)** | `config.min_lot_units` | PCR 150 / TBR 70 | l7, l11, l45 |
-| min demand to plan | `config.min_demand_units` | 0 / 0 | l4 |
+| min demand to plan | `config.min_demand_units` | **PCR 300 / TBR 150** | l4 |
+| B16 group load cap | `l2_ttl.LOAD_CAP` **(NOT in config.py)** | 0.95 of **calendar** hours | l2_ttl |
+| partition machine util | `cpsat_partition.UTIL` / `PLANNER_PART_UTIL` **(NOT in config.py)** | 0.95 of calendar hours | partition builder |
+| partition imbalance cap | `cpsat_partition.IMB_CAP_H` **(NOT in config.py)** | 8 h **within a B16 group** — MEASURED BINDING on 2 of 4 (plant, month) cells | partition builder |
 | **GT stock rail (enforced)** | `config.gt_wip_rail` | **PCR 4800 / TBR 1400** | l7 rail, l11 |
 | rail margin | `config.gt_wip_rail_margin` | **0.94** | l7 `_cap_ok` |
 | G8 band (reported, wider) | `config.gt_wip_min/max` | 4500–4800 / 1200–1500 | l11 |
 | **R5 shelf life** | `config.gt_shelf_life_h` | 72 h, *not env-overridable* | l7, l11 |
+| daily cure rate cap | `config.cure_day_cap` | **PCR 0 / TBR 0 = OFF** — gated on `PLANNER_L5_DAY_CAP=1`; measured and REJECTED at 13,000/3,200, §4y | l5 governor only |
 | plant CO rate benchmark | `config.plant_co_per_machine_day` | 2.66 / 3.56 | l11 gate |
 | plant weighted CO benchmark | `config.plant_weighted_co_min_per_machine_day` | **74.0 / 35.6** | l11 gate |
 | **changeover MINUTES** | `v_changeover_build` **(plant master, never hardcoded)** | PCR 28/60 m1-5, 22/42 m6-11 · TBR 10/24 | l11, scorecard, partition builder |

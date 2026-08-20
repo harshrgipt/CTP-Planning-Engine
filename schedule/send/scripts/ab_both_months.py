@@ -63,9 +63,13 @@ if not PY.exists():
 # two settled shape flags. Kept here so an arm cannot silently differ on them.
 MONTHS: dict[str, dict[str, str]] = {
     "2026-07": {
-        # July has no partition; L7 refuses a foreign month's stamp, so plan
-        # unpartitioned rather than against August's.
-        "PLANNER_PARTITION_PLANTS": "",
+        # STALE, CORRECTED 2026-08-18: a July partition exists and is stamped
+        # 2026-07 (`cpsat_partition.py` builds from committed masters, no MES).
+        # Forcing "" here silently ran every July arm on a NON-DEFAULT engine --
+        # the shipped default is "PCR" -- so nothing measured through this driver
+        # was measuring the shipped configuration. Left empty only if you are
+        # deliberately reproducing a pre-2026-08-17 result.
+        "PLANNER_PARTITION_PLANTS": "PCR",
         "PLANNER_LOT_INTERVAL_H": "8",
         "PLANNER_TH_GT_WIP_RAIL_MARGIN": "1.0",
     },

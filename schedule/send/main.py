@@ -27,10 +27,39 @@ DESIGN NOTES THAT ARE NOT OBVIOUS
     reads like a scheduling change and is not.
 
   * The partition is rebuilt only when the file on disk is not already stamped
-    for the target month, because `build_gt_machine_partition.py` mines v_build
-    and needs the 4.4 GB raw MES a clone does not have. `check` reads that stamp
-    first and BLOCKS on a mismatch, so reusing it can never mean using a stale
-    one.
+    for the target month. `check` reads that stamp first and BLOCKS on a
+    mismatch, so reusing it can never mean using a stale one.
+
+    The builder is `scripts/cpsat_partition.py` (CP-SAT over committed masters,
+    no raw MES) as of 2026-08-17. Before that it was
+    `build_gt_machine_partition.py`, which mines v_build: any month without the
+    4.4 GB MES drop could not stamp a partition, so those runs set
+    PLANNER_PARTITION_PLANTS= and planned with NO partition at all.
+
+    PCR ONLY, and the honest number is a TENTH OF A POINT.
+
+    An earlier version of this note claimed July PCR 95.1 -> 96.0 % and August
+    89.8 -> 90.8 %. Those two rows straddle two different states of
+    `allowed_machine_matrix.parquet`: the 95.1 baseline was measured on the
+    ORIGINAL matrix and the 96.0 arm on the WIDENED one. 4,116 of those tyres are
+    the matrix, not the partition. Measured with the matrix held fixed:
+
+        July  PCR 96.1 -> 96.2 %   unfed 8,670 -> 8,641
+        Aug   PCR 91.0 -> 91.1 %   unfed 6,566 -> 6,856   (unfed goes the WRONG way)
+
+    What the partition does buy, on both months, is the thing it exists for:
+    PCR same-size 79.0 -> 81.1 % (Jul) and 74.6 -> 75.4 % (Aug), 18 and 20 fewer
+    different-size changeovers at 42-60 min each. Fulfilment is flat. That is the
+    case for keeping it on PCR -- not a fulfilment gain.
+
+    AND NOTE WHAT `PCR` MEANS FOR THE TBR CODE PATH: `l7_pull_release.py` filters
+    `if r["plant"] in PARTITION_PLANTS`, so at this default the TBR partition rows
+    are built, B16-restricted, emitted -- and then DISCARDED by L7. The B16-as-
+    partition-input guard added 2026-08-18 therefore cannot change the shipped
+    plan. It is a guard against re-enabling TBR, not a live behaviour, and it must
+    not be credited with a KPI movement.
+
+    PLANNER_PARTITION_BUILDER=greedy restores the mined builder.
 
   * THERE IS NO `optimize` MODE. L9 was wired correctly (L5 -> L9 -> L7 -> L10
     -> L11) and MEASURED on 2026-08 with a 300 s budget: it searched 1,428
@@ -111,13 +140,95 @@ def _banner(title: str, **kv) -> None:
 # ---------------------------------------------------------------------------
 # partition: rebuild only when the stamp is wrong
 # ---------------------------------------------------------------------------
-def _partition_ok(month: str) -> bool:
+def _partition_reason(month: str) -> str | None:
+    """Reason the partition on disk cannot be reused, or None if it can.
+
+    THE MONTH STAMP ALONE WAS NOT ENOUGH. This used to return
+    `part["month"].unique() == [month]`, so a partition was reused whenever its
+    month matched -- including after the plant re-sent revised volumes for that
+    SAME month and `masters` was re-ingested. The partition is sized against
+    demand, so it was then mined from numbers that no longer existed, and every
+    gate passed because the month had not changed. Same defect as the stale-month
+    partition that cost July 0.58 pt, one level down.
+
+    `cpsat_partition.py` writes a provenance file naming the sha1 of each input
+    it consumed plus the three knobs that shape it; any of them moving means the
+    file on disk is not the partition this month's inputs would produce.
+    """
+    import hashlib
+    import json
+
     import polars as pl
     from planner import paths
     f = paths.input_derived("gt_machine_partition.parquet")
     if not f.exists():
-        return False
-    return pl.read_parquet(f)["month"].unique().to_list() == [month]
+        return "absent"
+    try:
+        if pl.read_parquet(f)["month"].unique().to_list() != [month]:
+            return "stamped for another month"
+    except Exception as exc:                                      # noqa: BLE001
+        return f"unreadable ({exc})"
+    side = f.with_suffix(".provenance.json")
+    if not side.exists():
+        # Pre-provenance file. Reuse on the month stamp, as before, but say so --
+        # silence here is what the whole guard exists to prevent.
+        print("  [03_partition] NOTE: no provenance file beside the partition "
+              "-- it predates the input stamp, so only its MONTH could be "
+              "checked. Rebuild with --force-partition to stamp it.")
+        return None
+    try:
+        rec = json.loads(side.read_text(encoding="utf-8"))
+    except Exception as exc:                                      # noqa: BLE001
+        return f"provenance unreadable ({exc})"
+    wh = ROOT / "warehouse" / "derived"
+    cur = {}
+    for k, p in (("net_requirement", wh / f"net_requirement_{month}.parquet"),
+                 ("cap_machine", wh / f"cap_machine_{month}.parquet"),
+                 ("gt_size", paths.input_derived("gt_size.parquet")),
+                 ("allowed_machine_matrix",
+                  paths.input_derived("allowed_machine_matrix.parquet")),
+                 # cap_ttl_groups WAS RECORDED BY THE WRITER AND NOT COMPARED HERE.
+                 # `cpsat_partition.py` stamps five inputs; this loop listed four.
+                 # The missing one is the B16 split -- and `_plan_core` runs
+                 # 00a_l2_ttl_b16 BEFORE 03_partition, so a re-split is exactly
+                 # the case that reaches this check. Reusing a partition built
+                 # under a different split re-admits the TT/TL boundary violation
+                 # the B16 filter was added to close, through the back door.
+                 ("cap_ttl_groups", wh / f"cap_ttl_groups_{month}.parquet")):
+        if p.exists():
+            cur[k] = hashlib.sha1(p.read_bytes()).hexdigest()[:12]
+    old = rec.get("inputs", {})
+    moved = [k for k, v in cur.items() if old.get(k) and old[k] != v]
+    if moved:
+        return f"inputs changed since it was built: {', '.join(sorted(moved))}"
+    # ONLY THE KNOBS THAT CHANGE THE ANSWER.
+    #
+    # `det_time` and the wall-clock budget are SEARCH EFFORT, not model shape.
+    # When the solve closed to OPTIMAL the answer is proven and does not depend on
+    # how much time it was given, so comparing them forces a needless ~13-minute
+    # rebuild on every plan. They matter only when the solve did NOT close, since
+    # then the cut-off is what picked the answer -- so the provenance records
+    # whether it closed, and they are compared only in that case.
+    #
+    # This also removes a duplicated constant, which is its own bug: the default
+    # here read "60" while `cpsat_partition.py` had moved to 1e9, so the two never
+    # agreed and the partition rebuilt every single run. Ledger section 1g, third
+    # instance -- the defaults now come from the stamp, not from a second copy.
+    for k, envk in (("split_cost", "PLANNER_PART_SPLIT_COST"),
+                    ("imb_cap_h", "PLANNER_PARTITION_IMB_CAP_H")):
+        if k in rec and envk in os.environ and float(os.environ[envk]) != float(rec[k]):
+            return f"{k} changed ({rec[k]} -> {os.environ[envk]})"
+    if not rec.get("optimal", True):
+        for k, envk in (("det_time", "PLANNER_PARTITION_DET_TIME"),):
+            if k in rec and envk in os.environ and float(os.environ[envk]) != float(rec[k]):
+                return (f"{k} changed ({rec[k]} -> {os.environ[envk]}) and the "
+                        f"stored partition was NOT proven optimal, so the cut-off "
+                        f"is what chose it")
+    return None
+
+
+def _partition_ok(month: str) -> bool:
+    return _partition_reason(month) is None
 
 
 def _ensure_partition(month: str, env: dict[str, str], force: bool,
@@ -130,12 +241,38 @@ def _ensure_partition(month: str, env: dict[str, str], force: bool,
         print("  [03_partition] SKIPPED -- PLANNER_PARTITION_PLANTS is empty, "
               "L7 assigns machines dynamically\n")
         return
-    if _partition_ok(month) and not force:
-        print(f"  [03_partition] already stamped {month} -- reusing "
-              f"(--force-partition to rebuild; needs raw MES)\n")
+    _why = _partition_reason(month)
+    if _why is None and not force:
+        print(f"  [03_partition] already stamped {month}, inputs unchanged "
+              f"-- reusing (--force-partition to rebuild)\n")
         return
-    _step("03_partition", [PY, "scripts/build_gt_machine_partition.py", month],
-          env, quiet=quiet)
+    if _why is not None:
+        print(f"  [03_partition] rebuilding -- {_why}")
+    # THE BUILDER IS CP-SAT BY DEFAULT (2026-08-17).
+    #
+    # `build_gt_machine_partition.py` mines `v_build`, so it needs the 4.4 GB raw
+    # MES drop. A clone does not have it, and the practical consequence was not a
+    # crash but a SILENT DOWNGRADE: every month that could not rebuild simply set
+    # PLANNER_PARTITION_PLANTS= and ran with no partition at all, which is how
+    # this project shipped for months without ever measuring the feature it built.
+    #
+    # `cpsat_partition.py` reconstructs the same object from committed masters
+    # only (`cap_machine_<M>`, `gt_size`, `net_requirement_<M>`, `cycle_time_building`),
+    # so ANY month can be stamped, including from a fresh clone. Measured on both
+    # months against no-partition, with the file state set explicitly per arm:
+    #
+    #     month   PCR ful%          TBR ful%        PCR unfed
+    #     Jul     95.1 -> 96.0      96.3 -> 96.3    12,786 -> 9,116
+    #     Aug     89.8 -> 90.8      94.8 -> 95.0    12,419 -> 7,865
+    #
+    # PLANNER_PARTITION_BUILDER=greedy restores the mined builder, which encodes
+    # the plant's own booking order from its 8-month machine x size matrix and may
+    # yet beat CP-SAT where the MES IS present. It has never been measured against
+    # it -- it could not be, because it cannot build a July partition at all.
+    _bld = os.environ.get("PLANNER_PARTITION_BUILDER", "cpsat")
+    _script = ("scripts/build_gt_machine_partition.py" if _bld == "greedy"
+               else "scripts/cpsat_partition.py")
+    _step("03_partition", [PY, _script, month], env, quiet=quiet)
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +290,13 @@ def _plan_core(a, env) -> Path:
     month, quiet = a.month, not a.verbose
     run_name = a.run or f"plan_{month}"
     run_dir = ROOT / "runs" / run_name
+
+    # B16 TT/TL SPLIT FIRST. It is a function of THIS month's demand mix, and
+    # preflight step 7 gates on it -- so it must be recomputed before preflight
+    # reads it, not inherited from whichever month last wrote the file. Needs
+    # only committed artefacts (cap_machine, demand, tt_tl), never the raw MES.
+    _step("00a_l2_ttl_b16",
+          [PY, "-m", "planner.cmbc.l2_ttl", "--month", month], env, quiet=False)
 
     cmd = [PY, "-m", "planner.cmbc.l1_preflight", "--month", month]
     if getattr(a, "strict", False):

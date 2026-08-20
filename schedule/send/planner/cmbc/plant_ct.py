@@ -72,7 +72,37 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 D = ROOT / "warehouse" / "derived"
 
 CAVITIES = 2.0                                   # measured, both plants
-LOAD_UNLOAD_MIN = {"PCR": 2.9, "TBR": 8.3}       # measured, see docstring
+# SENSITIVITY ONLY, ships at 0.0. Measured 2026-08-14 at +2.5 min:
+#   Jul PCR 95.9 -> 86.3 %   Aug PCR 91.1 -> 81.2 %   (BUILT -20k / -38k)
+#   Jul TBR 95.8 -> 93.0 %   Aug TBR 89.1 -> 87.1 %
+# PCR loses ~10 pt because its cycle is ~9.5 min (+2.5 = +26 %); TBR ~36 min
+# (+7 %). Cure cycle time is the most sensitive input in the model.
+CURE_CT_ADD_MIN = float(os.environ.get("PLANNER_CURE_CT_ADD_MIN", "0"))
+# Load/unload minutes added to the cure time to give the PRESS CYCLE.
+# The mined values are PCR 2.9 / TBR 8.3. PLANNER_LOAD_UNLOAD_MIN overrides BOTH
+# plants with a single figure -- the plant stated 2.5 min on 2026-08-14, which is
+# a small cut on PCR and a large one on TBR (8.3 -> 2.5). It is an override of a
+# MEASURED value by plant instruction, so state it whenever the numbers are used.
+# PLANT INSTRUCTION 2026-08-19: both plants ship at the plant's stated 2.5 min.
+# The MINED values were PCR 2.9 / TBR 8.3, derived as observed inter-load gap
+# minus the plant's stated cure time. On TBR that mined figure is 8.3 min against
+# a ~36 min cycle -- ~23 % of press capacity priced out as handling -- and the
+# plant stated 2.5 on 2026-08-14. This replaces a measured value with a plant
+# ruling, deliberately; `PLANNER_LOAD_UNLOAD_MIN` still overrides both plants,
+# and the mined pair is recorded here so the substitution is never invisible.
+# PLANT INSTRUCTION 2026-08-19, SECOND REVISION: PCR 2.5, TBR **5.75**.
+# The single 2.5 figure was applied to both plants; the plant has since given a
+# separate TBR number. TBR now sits between the mined 8.3 and the PCR 2.5, which
+# is what a longer TBR handling cycle would predict. The three values for TBR,
+# so the substitution stays visible: mined 8.3 · first ruling 2.5 · now 5.75.
+#
+# `PLANNER_LOAD_UNLOAD_MIN` still overrides BOTH plants with one figure, so it
+# can no longer express the shipped default -- use `PLANNER_LOAD_UNLOAD_PCR` /
+# `PLANNER_LOAD_UNLOAD_TBR` to move one plant alone.
+_LU = os.environ.get("PLANNER_LOAD_UNLOAD_MIN", "")
+LOAD_UNLOAD_MIN = ({"PCR": float(_LU), "TBR": float(_LU)} if _LU
+                   else {"PCR": float(os.environ.get("PLANNER_LOAD_UNLOAD_PCR", "2.5")),
+                         "TBR": float(os.environ.get("PLANNER_LOAD_UNLOAD_TBR", "5.75"))})
 
 # PCR machine make -- READ FROM THE ENGINE'S OWN CAPABILITY LAYER, not restated.
 # `cap_changeover.parquet` (written by l2_capability.py) already carries
@@ -164,8 +194,18 @@ class PlantCT:
         return self._c.get((plant, gt)) if self.ok else None
 
     def press_cycle_min(self, plant: str, gt: str) -> float | None:
+        """Cure minutes + load/unload, plus an optional SENSITIVITY offset.
+
+        PLANNER_CURE_CT_ADD_MIN adds a flat number of minutes to EVERY press
+        cycle. It exists to answer "what if the mined cure times are optimistic
+        by N minutes?" -- it makes curing SLOWER, so it can only reduce output.
+        It is a stress test, never a planning setting: 0.0 is the shipped value
+        and anything else must be stated when the numbers are quoted.
+        """
         c = self.cure_min(plant, gt)
-        return None if c is None else c + LOAD_UNLOAD_MIN.get(plant, 0.0)
+        if c is None:
+            return None
+        return c + LOAD_UNLOAD_MIN.get(plant, 0.0) + CURE_CT_ADD_MIN
 
     def press_rate(self, plant: str, gt: str) -> float | None:
         """Tyres per press-HOUR, nameplate x availability. See docstring."""

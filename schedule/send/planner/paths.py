@@ -147,3 +147,13 @@ def opening_gt(month: str) -> Path:
 
 def press_list(month: str) -> Path:
     return MASTERS / f"press_list_{month}.json"
+
+
+def holidays(month: str) -> Path:
+    """The month's plant-closure calendar (rule G3). Absent = no holidays.
+
+    A holiday is CALENDAR DATA, not a cap, so it lives beside the other month
+    masters rather than in `config.py`'s enforced-caps block. Read only by
+    `planner/cmbc/holiday.py`; nothing else opens this path.
+    """
+    return MASTERS / f"holidays_{month}.json"

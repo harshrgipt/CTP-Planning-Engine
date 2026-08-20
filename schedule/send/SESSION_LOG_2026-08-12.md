@@ -65,6 +65,7 @@ negative or neutral. Every change that paid was a DATA fix.**
 | **L9 optimiser** | 1,428 candidates, **0 moves accepted**, all nine cost tiers unchanged |
 | **Queue-level rim grouping in L5** | already in the code as a failed experiment: 0 same-rim changes, −25,549 tyres |
 | **Removing the tail** (`HORIZON_TAIL_H=0` / `truncate`) | **−1.3 pt PCR.** The tail was never counted in-month; removing it deletes the pull that keeps building running on day 31 |
+| **Opening-stock-first in the L5 seat queue** (`PLANNER_L5_STOCK_FIRST=1`, added and rejected 2026-08-19, PARTITION §4z) | **BUILT −4,337 PCR / −599 TBR on July.** It hits every stated objective — day-1 cure 7,813 → 9,076 PCR and 2,278 → 2,479 TBR, opening stock left to expire 699 → 70 tyres, presses starting late PCR 60 → 54 — and **day 2, the day-2-onward mean and total output all fall on both plants.** Day-1 rising while BUILT falls is relocation. Starvation PCR 3,309 → 7,400 with **100 % of it on the promoted GTs**: a campaign seated at t0 burns its stock cover in hours and then needs green that cannot be released before t0. This makes §7 item 4 concrete — **more opening stock on more GTs would not have helped either; the day-1 constraint is building's release, not the seat queue.** |
 
 ---
 
@@ -241,4 +242,6 @@ PLANNER_HARD_PIN=1              sticky pinning kept; de-pin measured worse
 PLANNER_HORIZON_MODE=extend     tail 72 h; removing it costs 1.3 pt
 PLANNER_SLIVER_TBR=0            anti-sliver off on TBR
 PLANNER_PARTITION_PLANTS=       (July only — no July partition exists)
+  ^ STALE as of 2026-08-17: cpsat_partition.py builds a July-stamped
+    partition from committed masters. The shipped default is PCR.
 ```

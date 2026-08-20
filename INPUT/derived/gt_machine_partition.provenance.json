@@ -1,0 +1,15 @@
+{
+  "det_time": 1000000000.0,
+  "imb_cap_h": 8.0,
+  "inputs": {
+    "allowed_machine_matrix": "144a8e1d3283",
+    "cap_machine": "bba5249cd1d2",
+    "cap_ttl_groups": "49787c6f2de0",
+    "gt_size": "f1ad3ad32766",
+    "net_requirement": "bc549c66a0d8"
+  },
+  "month": "2026-08",
+  "optimal": true,
+  "rows": 96,
+  "split_cost": 1.0
+}

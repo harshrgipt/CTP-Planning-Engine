@@ -69,8 +69,26 @@ def _run(mod: str, month: str, run: str, flag: str) -> str:
 
 
 def _score(run: str) -> tuple[float, pl.DataFrame]:
+    """Acceptance metric: REAL TYRES BUILT. Nothing else.
+
+    THIS USED TO SCORE `qty_fed_in_month` AND THAT IS WHY THE LOOP LOST.
+    `fed` counts opening stock as though the month produced it and rises
+    whenever cures are pulled earlier, so it moves without any tyre being made.
+    Selecting the "best" iteration on it means the loop can accept a plan that
+    produces LESS and reject one that produces more -- which is consistent with
+    both shipped modes measuring negative (delay -16,548, split -18,129).
+
+    BUILT excludes the OPENING_STOCK pseudo-machine: that row is floor stock the
+    month opened with, not production, and summing the whole frame overstates
+    output by ~3.8k PCR / ~1.0k TBR.
+
+    Ties break on unfed, so an iteration that builds the same volume with less
+    starvation is preferred.
+    """
     cc = pl.read_parquet(paths.RUNS / run / "cure_campaigns_reconciled.parquet")
-    return float(cc["qty_fed_in_month"].sum()), cc
+    bs = pl.read_parquet(paths.RUNS / run / "build_schedule.parquet")
+    built = float(bs.filter(pl.col("machine") != "OPENING_STOCK")["qty"].sum())
+    return built, cc
 
 
 def main() -> None:
@@ -99,7 +117,7 @@ def main() -> None:
     print(f"\n  L5<->L6 LOOP  {a.month}  run={a.run}  "
           f"step={a.step:.0f} h  cap={a.max_delay:.0f} h")
     print(f"  {'-' * 74}")
-    print(f"  {'iter':>4}{'delayed GTs':>13}{'fed in-month':>15}"
+    print(f"  {'iter':>4}{'delayed GTs':>13}{'BUILT (real)':>15}"
           f"{'unfed':>11}{'campaigns unfed':>17}")
 
     for it in range(a.iters + 1):

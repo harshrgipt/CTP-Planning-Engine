@@ -20,6 +20,18 @@ MOULD CHANGES ARE THE THING BEING SLOTTED
   as how many there are -- a change spanning a shift boundary occupies two crews
   instead of one.
 
+PLANT HOLIDAYS (rule G3) -- THE DISCRETISER IS WHERE THIS GOES WRONG
+  `spread()` apportions a cure campaign's tyres over the shifts it occupies. A
+  campaign that pauses over a closure has a wall-clock span 24 h longer than the
+  press-hours it draws, so apportioning on the CLOCK credits the shut day with
+  `rate x 24` tyres AND dilutes every other shift of that campaign by the same
+  factor. The symptom is not the holiday -- it is THE NEIGHBOURING DAYS SAGGING,
+  and it is a discretisation artefact that reads exactly like a scheduling
+  result. The denominator is working seconds; a closed shift is emitted with
+  qty 0 so the day is present-and-zero rather than missing. Mould-change starts
+  are back-derived with `sub_work` for the same reason -- fitters do not work a
+  shutdown. See planner/cmbc/holiday.py and PARTITION_AND_CHANGEOVER.md 4aa.
+
 R13 -- CREW IS A SHARED FINITE RESOURCE
   Each change needs 2 fitters (same size) or 3 (different size), from the plant's
   own changeover master. Crew is shared across every press in the plant, so two
@@ -40,6 +52,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 from planner import paths
+from planner.cmbc import holiday
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 D = ROOT / "warehouse" / "derived"
@@ -73,6 +86,7 @@ def main() -> None:
 
     y, m = int(a.month[:4]), int(a.month[5:7])
     t0 = datetime(y, m, 1, DAY_START_H, 0)
+    holiday.load(a.month)              # rule G3; empty = every call is identity
     mch = {p: float(pmc.filter(pl.col("plant") == p)["mould_change_min"].median())
            for p in ["PCR", "TBR"]}
     mch_press = {r["wc_id"]: float(r["mould_change_min"])
@@ -93,10 +107,28 @@ def main() -> None:
     # (TBR) while build, whose slices fit inside a shift, read 1.1x. The ratio
     # was measuring the bucketing, not the plan.
     def spread(df):
+        # ---- PLANT HOLIDAY (rule G3): APPORTION BY WORKING TIME -------------
+        # THIS IS WHERE A HOLIDAY GOES WRONG IF IT GOES WRONG ANYWHERE.
+        # L5 pauses a campaign that meets a closure, so its wall-clock span
+        # grows 24 h while the tyres it delivers do not change. Apportioning on
+        # the WALL CLOCK -- `frac = seg / (en - st)` -- then does two things at
+        # once: it credits the closed day with `rate x 24` tyres it cannot
+        # produce, AND it dilutes every other shift of that campaign by the same
+        # factor. The visible symptom is not the holiday; it is the days either
+        # side sagging. That is a discretisation artefact, NOT a scheduling
+        # result, and it would have been read as one.
+        # So the denominator is WORKING seconds and each segment is credited its
+        # own working seconds. A closed shift gets frac 0 -- and it is still
+        # EMITTED, with qty 0, so the holiday appears in the grid as a day that
+        # produced nothing rather than as a day that is missing.
+        # MEMORY: "clip hours into the day/period they are actually spent."
+        # Identity with no calendar configured -- `work_seconds` is then exactly
+        # `(b - a).total_seconds()`.
         rows = []
         for r in df.iter_rows(named=True):
             st, en = r["start_ts"], r["end_ts"]
-            total = max((en - st).total_seconds(), 1.0)
+            _pl = r["plant"]
+            total = max(holiday.work_seconds(_pl, st, en), 1.0)
             cur = st
             while cur < en:
                 dd, ss = shift_of(cur, t0)
@@ -104,12 +136,13 @@ def main() -> None:
                 h = (cur - t0).total_seconds() / 3600.0
                 nxt = t0 + timedelta(hours=(int(h // SHIFT_H) + 1) * SHIFT_H)
                 seg = min(nxt, en)
-                frac = max((seg - cur).total_seconds(), 0.0) / total
+                _w = max(holiday.work_seconds(_pl, cur, seg), 0.0)
+                frac = _w / total
                 rows.append({**{k: r[k] for k in
                                 ("plant", "gt_code", "press") if k in r},
                              "day": dd, "shift": ss,
                              "qty": float(r["qty"]) * frac,
-                             "hours": (seg - cur).total_seconds() / 3600.0})
+                             "hours": _w / 3600.0})
                 cur = seg
         return pl.DataFrame(rows)
 
@@ -177,7 +210,12 @@ def main() -> None:
                 # a change ends when the next campaign starts
                 end = r["start_ts"]
                 mm = mch_press.get(pr, mch[p])
-                start = end - timedelta(minutes=mm)
+                # HOLIDAY: a mould change is fitters' WORK. L5 already spends it
+                # through the calendar when it seats the campaign, so this
+                # back-derivation has to as well or the change prints inside a
+                # shut plant. Identity with no calendar configured.
+                start = holiday.sub_work(
+                    p, end, timedelta(minutes=mm).total_seconds())
                 same_rim = (rim.get(r["gt_code"]) is not None
                             and rim.get(r["gt_code"]) == rim.get(last["gt_code"]))
                 dd, ss = shift_of(start, t0)

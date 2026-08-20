@@ -132,6 +132,55 @@ def run(*, write: bool = True) -> pl.DataFrame:
             .join(gsm, on=["plant", "sku"], how="left")
             .with_columns(pl.coalesce(["gt_rec", "gt_mas"]).alias("gt_code"))
             .drop(["gt_rec", "gt_mas"]))
+    # ---- FALLBACK: the file's own GT CODE column, EXACT MATCH ONLY ---------
+    # A row whose SKU does not bridge loses its machines entirely, and that is
+    # not harmless: the matrix is keyed per FG, so one GT can appear on several
+    # rows and we take the UNION. Drop one row and the GT silently narrows.
+    #
+    # GT 1513 XPC1 MSIL is exactly that. Two FG rows:
+    #     1225215013008SXC10 -> 3404, 3407, 3410   (SKU not in recipe OR master)
+    #     1D25215013008SXC10 -> 3407, 3410         (bridges fine)
+    # so the union shipped as M7, M10 and TBMPCR4 was lost -- on the plant's
+    # single largest GT (55,663 tyres in July, 1,378 short).
+    #
+    # The fallback is deliberately the narrowest thing that fixes it: take the
+    # row's own GT CODE, normalise whitespace/case and the missing "GT " prefix,
+    # and accept it ONLY on an exact match against a gt_code the engine already
+    # knows for that plant. No fuzzy matching, no numeric-head expansion.
+    #
+    # This is safe for TBR by construction rather than by exception: that file's
+    # GT CODE column is the BOM namespace ("GT 5001"), which has ZERO string
+    # overlap with TBR MES codes, so nothing matches and nothing is added.
+    # Measured: 43 PCR rows fail the SKU bridge and exactly ONE of them has a
+    # GT CODE the engine recognises. A fallback that fired more often than that
+    # would be guessing, and guessing a machine onto a GT is unbuildable work.
+    #
+    # MEASURED 2026-08-13: THE FIX IS CORRECT AND WORTH EXACTLY ZERO TYRES.
+    # It adds one (gt, machine) pair -- PCR 841 -> 842, TBR unchanged -- and
+    # both months come out BIT-IDENTICAL:
+    #     Jul PCR 385,084 BUILT / 96.2 %      Jul TBR 95,783 / 95.7 %
+    #     Aug PCR 410,652 BUILT / 91.4 %      Aug TBR 92,541 / 89.4 %
+    # GT 1513 now ALLOWS M4, M7, M10 and the scheduler still uses M7, M10 only:
+    # TBMPCR4 runs at 92.1 % with 59 idle hours in August, so it has nothing to
+    # offer a 55,663-tyre GT and loses the machine-choice ranking to M7/M10.
+    #
+    # Kept anyway. A constraint that misstates what the plant permits is wrong
+    # whether or not it currently binds, and it would bind the moment M4's load
+    # changes. Do not "revert the no-op".
+    eng = (pl.read_parquet(paths.wh_derived("cap_machine_2026-08.parquet"))
+             .select("plant", "gt_code").unique())
+    eng = eng.with_columns(
+        pl.col("gt_code").str.replace(r"^GT ", "").str.strip_chars()
+          .str.replace_all(r"\s+", " ").str.to_uppercase().alias("_k"))
+    key = {(r["plant"], r["_k"]): r["gt_code"] for r in eng.iter_rows(named=True)}
+    j = j.with_columns(
+        pl.when(pl.col("gt_code").is_null() & pl.col("src_gt").is_not_null())
+          .then(pl.struct(["plant", "src_gt"]).map_elements(
+              lambda r: key.get((r["plant"], " ".join(
+                  str(r["src_gt"]).strip().upper().split()))),
+              return_dtype=pl.Utf8))
+          .otherwise(pl.col("gt_code")).alias("gt_code"))
+
     ok = j.filter(pl.col("gt_code").is_not_null())
     bad = j.filter(pl.col("gt_code").is_null())
 

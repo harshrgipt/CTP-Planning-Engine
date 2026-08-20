@@ -57,8 +57,25 @@ PY = sys.executable
 # cure_campaigns_reconciled, build_starved, build_by_shift, cure_by_shift,
 # mould_changes and l11_invariants all compare equal, and the BTP pack matches
 # the shipped one on all 34 sheets.
-STAGES = ["l5_cure_master", "l7_pull_release", "l10_discretise",
-          "l11_validate_plan"]
+# L4 AND L4.5 ARE IN THE ARM AS OF 2026-08-14.
+# They were not, and that made `n_lots` -- how many cure campaigns a GT gets,
+# which drives campaign count, concurrency, campaign length and build run size
+# -- untestable: every arm inherited a frozen l45_lots_<M>.parquet from whatever
+# `main.py plan` ran last. CONC_FLOOR had to be written INSIDE L5, halving jobs
+# after reading them, purely because the harness could not re-derive the
+# decomposition. That was a workaround for this defect, not a design choice.
+# They write to the SHARED warehouse/derived/, so an arm still re-bases the
+# masters for the next one -- the provenance stamp (planner/cmbc/_stamp.py) plus
+# preflight's `master.stale_flags` gate is what makes that detectable.
+# l2_ttl ADDED 2026-08-17. It was outside the arm, so every arm INHERITED
+# `cap_ttl_groups_<M>.parquet` from whatever `main.py plan` ran last -- the same
+# defect that made `n_lots` un-A/B-able until L4/L4.5 were pulled in. This file
+# assigns each of the nine TBR building machines to the TT or TL group, and B16
+# forbids spilling across that boundary, so an inherited one re-bases the entire
+# TBR side of an arm. NOTE: adding it changes arm baselines; any TBR figure
+# measured before this date was measured on a possibly-inherited split.
+STAGES = ["l2_ttl", "l4_net_requirement", "l45_lotsize", "l5_cure_master",
+          "l7_pull_release", "l10_discretise", "l11_validate_plan"]
 
 
 def run_arm(name: str, month: str, env_over: dict[str, str],
@@ -69,6 +86,17 @@ def run_arm(name: str, month: str, env_over: dict[str, str],
     env = {**os.environ, **env_over, "PYTHONIOENCODING": "utf-8"}
     for st in STAGES:
         # L5 names its destination `--out`; every later layer calls it `--run`.
+        # L4/L4.5 are month-scoped and take no run/out argument at all.
+        # l2_ttl is month-scoped like L4/L4.5 -- it writes warehouse masters, not
+        # run-directory artefacts, so it takes --month and no --run/--out.
+        if st in ("l2_ttl", "l4_net_requirement", "l45_lotsize"):
+            cp = subprocess.run(
+                [PY, "-m", f"planner.cmbc.{st}", "--month", month],
+                cwd=ROOT, env=env, capture_output=True, text=True)
+            if cp.returncode != 0:
+                raise SystemExit(f"!! {name}: {st} failed\n"
+                                 f"{cp.stdout[-1500:]}")
+            continue
         flag = "--out" if st == "l5_cure_master" else "--run"
         cp = subprocess.run(
             [PY, "-m", f"planner.cmbc.{st}", "--month", month, flag, name],

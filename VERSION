@@ -1,4 +1,4 @@
-CTP-PLANNER  v13  ·  2026-08-13
+CTP-PLANNER  v14  ·  2026-08-13
 
 There is no git history behind this snapshot, so the version marker is a DATE
 STAMP plus an arm generation (v8 = the eighth measured configuration).
@@ -8,8 +8,41 @@ SHIPPED PACKS
   output/V13_AUG2026_pack/   August 2026  PCR 91.4 % / TBR 89.4 % in-month
 
   Quoted from l11_invariants.parquet, basis "IN-MONTH output vs plannable
-  requirement, THIS PLANT" = built + opening - closing. This is the ONLY
-  fulfilment basis this file quotes.
+  requirement, THIS PLANT".
+
+  ALWAYS QUOTE ALL THREE BASES. in-month alone is TAIL-SENSITIVE -- a change
+  that pulls cures earlier inflates it while producing nothing. v14 found this
+  the hard way (below).
+
+                demand     BUILT  built%  in-month   inm%    tail  inm+tail  tot%
+    Jul PCR    398,405   385,084   96.7%   383,266  96.2%   6,372   389,638  97.8%
+    Jul TBR     98,020    95,783   97.7%    93,777  95.7%   2,006    95,783  97.7%
+    Aug PCR    429,146   410,652   95.7%   392,239  91.4%  23,381   415,620  96.8%
+    Aug TBR     99,019    92,541   93.5%    88,523  89.4%   3,517    92,040  93.0%
+
+  !! CAVEAT ADDED 2026-08-19 -- THE `in-month` / `inm%` / `inm+tail` / `tot%`
+  !! COLUMNS ABOVE ARE WRONG, and so are the same figures republished in the
+  !! v14 PRESS_FROM_MATRIX table and the "AUGUST >95 % IN-MONTH" section below.
+  !! They came from scripts/arm_scorecard.py BEFORE its 2026-08-14 fix. It
+  !! reconstructed in-month as `L11_pct / 100 * demand`, but L11 divides by
+  !! GROSS_BUILD (= demand - opening cover + yield uplift), so the rebase used
+  !! the WRONG DENOMINATOR. Check it yourself: 0.914 x 429,146 = 392,239 to the
+  !! tyre, and 0.894 x 99,019 = 88,523 -- these are not measurements, they are
+  !! the percentage multiplied back out. Error ~1 %, SIGN FLIPS BY PLANT:
+  !! Jul PCR +3,708 / TBR -538, Aug PCR +2,444 / TBR -749. The `BUILT` column
+  !! additionally includes the OPENING_STOCK pseudo-machine (~3.8 k PCR /
+  !! ~1.0 k TBR), excluded only from 2026-08-14 onward.
+  !!
+  !! WHAT SURVIVES: the `demand` column, every DELTA between arms (both defects
+  !! are identical across arms and cancel in a difference), and therefore every
+  !! ship/reject decision recorded in this file. The `inm%` percentages are
+  !! L11's own numbers on the gross_build basis -- correct as percentages,
+  !! mislabelled as to basis. Nothing here was re-derived for this caveat; the
+  !! table is kept so the record stays auditable. Sixth measurement-basis
+  !! defect; see PARTITION_AND_CHANGEOVER.md section 1 and the caveat block in
+  !! planner/cmbc/l5_cure_master.py.
+
+  Judge changes on BUILT. Report in-month as the KPI. Give both, always.
 
   !! v12's figures were WRONG -- a sweep harness summed `qty_fed_in_month`,
   the FED basis (tyres delivered into presses, which INCLUDES opening stock),
@@ -59,6 +92,40 @@ WHAT CHANGED v8 -> v12
        per plant, 0.05 pt tolerance. "Net positive across the two" is NOT
        sufficient: a +0.6/-0.5 flag is noise with a sign, and shipping it
        degrades a real pack to flatter a backtest.
+
+  v14  MEASUREMENT CORRECTION + the August ">95 %" investigation.
+
+       SIXTH measurement defect, and the first that would have flattered a KPI
+       rather than a report. cap_press_<M> is MINED and omits 6 PCR presses
+       (17-22) that the plant's own allowed_press_matrix marks `direct` for
+       GT 1402 and GT 1412. Unioning them in reads as the biggest win of the
+       project -- August PCR in-month 91.4 % -> 94.8 %. IT IS NOT A WIN:
+
+                          BUILT    in-month         tail   TOTAL REAL OUTPUT
+         Aug off        410,652  392,239 (91.4%)  23,381   415,620 (96.8%)
+         Aug ON         408,220  406,830 (94.8%)   6,616   413,446 (96.3%)
+         Jul off        385,084  383,266 (96.2%)   6,372   389,638 (97.8%)
+         Jul ON         378,838  382,070 (95.9%)   1,290   383,360 (96.2%)
+
+       It BUILDS FEWER TYRES on both months and total output falls on both.
+       Every point of the gain is the carry-out tail moving inside the horizon.
+       Ships behind PLANNER_PRESS_FROM_MATRIX, default OFF. The master defect
+       is real and stands; exploiting it is not worth 2,432 tyres.
+
+       A gate can be CLEAN and still cost you output. The press gate was
+       verified only for violations ("0 violations") and never for OMISSIONS.
+       Check both directions on every eligibility master.
+
+       new: scripts/arm_scorecard.py  prints BUILT / in-month / tail / total
+       per arm, so no change is ever judged on in-month alone again.
+
+       Also corrected three wrong demerits in JULY_2026_PLANT_VS_ENGINE.docx:
+       machine and press breadth were graded against the ALLOWABLE CEILING
+       instead of against the plant (the plant uses 1.57 machines per SKU; we
+       use 2.17 -- we are BROADER, not narrower), and daily-output CV was
+       computed on wall-clock dates with two partial boundary days (PCR
+       interior CV is 0.156 not 0.267; TBR is 0.113 vs the plant's 0.142, i.e.
+       we are STEADIER). Full record in section 12 of that document.
 
 WHAT CHANGED SINCE 2026-08-10 (v1)
   allowable machine list   NOW HARD. It was a frozen input nothing read; 19.9 %
@@ -121,6 +188,24 @@ OPEN -- needs the plant, not engineering
   unmapped demand       60 rows; 5 Book6 SKUs (9,854 tyres) have no GT
   TBR cure cycle times  50 rows missing, mined fallback in use
   running-mould files   2-3 days only, timestamps read 2024 not 2026
+
+AUGUST ">95 % IN-MONTH" -- ASKED FOR, MEASURED, NOT AVAILABLE
+  Nine arms swept 2026-08-13 (recorded in l5_cure_master.py). The August PCR
+  in-month CEILING is ~94.8 %, and every arm that lifts in-month cuts BUILT:
+  HORIZON_MODE strict -30,572 BUILT · truncate -26,496 · window -17,470 ·
+  HORIZON_TAIL_H 48 -6,890 · 24 -16,852 · PRESS_FROM_MATRIX -2,432.
+
+  Cause: ~14,400 PCR tyres are BUILT after 1 Sep 07:00 under the default 72 h
+  extension. Shortening the extension does not move them inside the month, it
+  DELETES them -- BUILT falls faster than in-month rises.
+
+  Where August ALREADY clears 95 %:  PCR BUILT 95.7 % · PCR in-month+tail 96.8 %
+  Where it does not:                 PCR in-month 91.4 % · TBR on every basis
+
+  The two honest routes above 95 %, both PLANT RULINGS, not code:
+    horizon ruling      Aug PCR 91.4 % -> 96.8 % (23,381 tyres already built)
+    B12 sub-floor, TBR  6,100 tyres over 225 lots = 6.2 pt. The plant itself
+                        runs 30.8 % of TBR sub-floor; we run 0.0 %.
 
 ARITHMETIC CEILINGS -- no scheduler recovers these
   Aug PCR needs 13,764 tyres/day; presses peak at 13,319/day  -> -3.2 pt
