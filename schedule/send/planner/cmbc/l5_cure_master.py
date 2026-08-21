@@ -53,7 +53,7 @@ from pathlib import Path
 
 import polars as pl
 
-from planner.cmbc import allowable, holiday, plant_ct
+from planner.cmbc import allowable, holiday, plant_ct, r3_cap
 from planner.config import CONFIG, GT_SHELF_LIFE_H
 from planner import paths
 
@@ -240,6 +240,37 @@ MOULD_LIFE_TYRES = MOULD_LIFE_CYCLES * 2.0
 # tau_min. NB the EARLY_STOCK note above was measured on the 98.9 %-era engine,
 # long before tau_min release, the partition and the derived slice rule -- its
 # baseline no longer exists, so re-measure before trusting it.
+# SHIPS "slice" BY PLANT INSTRUCTION, 2026-08-20. tau* is REMOVED from the
+# release: a press may cure at t0 + tau_min (16 min) instead of
+# t0 + tau* + first-slice build (259 min + slice) on PCR.
+#
+# THE PLANT'S MODEL, and it is right about the physics: building starts, the
+# first tyres exist ~16-20 min later, and the press can take them. The B12 build
+# RUN floor then keeps building on that GT for at least min_lot (PCR 150 /
+# TBR 70) before any changeover, so the press is fed continuously rather than
+# for one slice. Verified on the shipped plan: 0 of 792 PCR and 0 of 514 TBR
+# build runs fall below the floor, run size p50 318 / 120.
+#
+# WHAT IT BUYS -- day 1, measured both months:
+#     Jul PCR  cure 8,782 -> 13,519   press util 59 -> 89 %   t0 presses 25 -> 52
+#     Aug PCR  cure 7,902 -> 12,961   press util 55 -> 88 %   t0 presses 20 -> 47
+#     Jul TBR  2,444 -> 3,139         Aug TBR 2,317 -> 3,214
+#
+# WHAT IT COSTS, AND THE COST IS REAL -- see §4ad:
+#     BUILT  Jul PCR -3,885 · TBR -1,787 · Aug PCR -7,088 · TBR -1,501
+#     starvation Aug PCR 18,311 -> 26,183
+#     in-month  95.07 -> 94.14 · 97.87 -> 95.60 · 92.18 -> 90.71 · 97.89 -> 96.42
+#
+# The day-by-day decomposition (§4ad): d1 +5,060 cure, d2-7 exactly 0 (presses
+# are at 100 % either way), d8-31 -3,473. The d1 gain is the standing floor
+# surplus being consumed, not tyres created. The month loses because 47 presses
+# then want 47 different GTs from 11 machines, with 32.6 % of PCR volume locked
+# to 1-2 of them.
+#
+# SHIPPED ON INSTRUCTION WITH THE COST STATED. `PLANNER_L5_FLOOR_BASIS=star`
+# restores the wall and recovers the BUILT. The real fix is `allowed_machine_matrix`
+# widening -- a PLANT RULING, since MES shows the plant itself runs 5-11 machines
+# per GT where the matrix permits 1-2. `feed` is a bounded variant, still OFF.
 FLOOR_BASIS = os.environ.get("PLANNER_L5_FLOOR_BASIS", "star")
 # Prefer the press with the fewest ELIGIBLE GTs when two are otherwise equal.
 # See the block beside its use: the plant's four fastest PCR presses are also
@@ -251,6 +282,98 @@ SCARCE_SLACK_H = float(os.environ.get("PLANNER_L5_SCARCE_SLACK_H", "0"))
 # Distinct presses a GT may visit, as a multiple of the plant's observed_max.
 # 0 = off. See the block beside its use for the 189-vs-136 measurement.
 MAXPG = float(os.environ.get("PLANNER_L5_MAX_PRESS_PER_GT", "0"))
+# ---- MONTH-END COMPLETABILITY (PLANNER_L5_MONTHEND_FIT) ---------------------
+#
+# WHAT THIS DOES / WHY IT EXISTS -- an experiment against a stated defect, run
+# 2026-08-21. In the last N plant-days, prefer a (press, start) that lets a
+# campaign FINISH before `month_end` over one that spills past it.
+#   off (default) | prefer | require | split          window: ..._WIN_D (days)
+#   ..._STRICT=1  makes `require` REFUSE a campaign that cannot fit rather than
+#                 fall back to the ungoverned seat (DAY_CAP soft/strict doctrine:
+#                 a shape preference that becomes lost demand must be PRICED).
+#
+# THE PREMISE IT WAS BUILT ON IS FALSE, AND THAT IS THE MAIN RESULT.
+#   The brief was "a campaign ending after month_end contributes ZERO to
+#   in-month fulfilment". It does not. `l7_pull_release.py` (search
+#   `frac_in_month`) PRORATES a crossing campaign:
+#       frac = 1.0                                  if end_ts <= month_end
+#            = 0.0                                  if start_ts >= month_end
+#            = (month_end - start_ts) / duration     otherwise
+#   Measured on the shipped August plan: of 57 crossing PCR campaigns
+#   (40,997 tyres) only TWO have frac == 0, and those START after the boundary.
+#   The other 55 already deliver their in-month share. L5's own gate line has
+#   said so all along -- "campaigns crossing month end : 73 -- only the in-month
+#   fraction is counted". The 12,620-tyre PCR "tail" is the OUT-of-month
+#   remainder of prorated campaigns, not a set of zeroed ones.
+#
+# `prefer` AND `require`(soft) ARE STRUCTURAL NO-OPS -- proven, not argued.
+#   `dur` is qty/rate with rate keyed on (plant, gt), NOT on press;
+#   MOULD_LIFE_CYCLES defaults to 0 and no holiday calendar is configured, so
+#   `en == st + dur` exactly and identically on every candidate press.
+#   Completability is therefore a MONOTONE function of `st` -- the key the
+#   greedy already leads on. If the earliest press cannot finish in-month, no
+#   press can; if it can, it was already chosen. Ranking `_fits` above `st`
+#   re-orders nothing. This is DO-NOT #35 one level up: a preference that is a
+#   monotone function of the key you already sort on is not a preference.
+#
+# SHIPS OFF. MEASURED 2026-08-21, AUGUST 2026 ONLY (the partition on disk is
+# stamped 2026-08 and must not be rebuilt; NO JULY ARM EXISTS). Fresh arms via
+# scripts/run_arm.py from ME_base, all gated FRESH by check_arm_fresh.py,
+# PLANNER_L7_CLOSING_BUFFER=1.
+#
+#   arm         PCR BUILT  dBUILT   in-month   ful%    tail  starved   L11
+#   ME_base       409,511      +0    397,326  92.59  12,620   12,477  32/48
+#   pref  N=7     409,511      +0    397,326  92.59  12,620   12,477  32/48
+#   split N=7     409,511      +0    397,241  92.57  12,567   12,615  32/48
+#   split N=5     408,795    -716    397,091  92.53  12,556   12,776  32/48
+#   require N=7   399,907  -9,604    391,819  91.30   8,783   10,917  32/48
+#
+#   arm         TBR BUILT  dBUILT   in-month   ful%    tail  starved
+#   ME_base        98,003      +0     96,932  97.89   1,508    1,654
+#   pref  N=7      98,003      +0     96,932  97.89   1,508    1,654
+#   split N=7      97,990     -13     96,961  97.92   1,466    1,667
+#   split N=5      97,990     -13     96,962  97.92   1,465    1,667
+#   require N=7    96,529  -1,474     95,577  96.52   1,389    1,775
+#
+#   `pref` at N = 5, 7 AND 10 is BYTE-IDENTICAL to ME_base on all ELEVEN run
+#   artefacts (cure_campaigns, build_schedule, gt_events, reconciled,
+#   build_starved, build_by_shift, cure_by_shift, mould_changes,
+#   l11_invariants, carry_forward_gt, carry_out). The mechanism fires -- it
+#   detects 63/68/73 spilling campaigns -- and changes nothing.
+#
+# `split` IS ARITHMETICALLY NEUTRAL BY CONSTRUCTION. Cutting at the boundary
+# turns one prorated row into a frac==1.0 row plus a frac==0.0 row whose
+# quantities are that same proration, so in-month cannot move except by integer
+# rounding at the cut: the L5-side prorated total moves 6 tyres on PCR and 2 on
+# TBR. What it DOES change is L7's problem -- 17 extra campaign rows are 17
+# extra independent build releases -- and that is why PCR starvation rises 138
+# and in-month falls 85 while TBR gains 29. MIXED SIGN ACROSS PLANTS = fails
+# the gate. This is the THIRD cure-campaign split measured on this engine
+# (MAX_CAMPAIGN_H -43,104; l56_loop -18,129) and the first that is merely
+# neutral rather than catastrophic -- because it is the only one that does NOT
+# move the press seats. It still does not pay.
+#
+# THE TRAP, STATED PLAINLY. `require` CUTS THE PCR TAIL 12,620 -> 8,783 and
+# that is its worst arm: BUILT -9,604 and in-month -1.28 pt. A smaller tail is
+# not a win -- tail tyres are next month's opening stock, and the only way to
+# shrink the tail without producing less is to move work in-month, which
+# requires an EARLIER seat, which the greedy already takes. Read the tail column
+# alone and `require` is the best arm in the table. It destroys 9,604 tyres.
+# Second trap: `split N=7` shows BUILT-in-month +765 PCR while total BUILT is
+# UNCHANGED at 409,511 -- 765 tyres of build merely crossed the reporting
+# boundary. That is the PLANNER_L7_TAIL_BUILD_PULL reading of section 4ak.1;
+# quote clipped and unclipped BUILT together or it reads as a free win.
+#
+# NOT PLANNER_L5_MAX_CAMPAIGN_H, and it did not collapse into it. That flag is
+# a GLOBAL span cap applied to every campaign before the sort (-43,104 PCR BUILT
+# at 240 h, unfed x6.7). This is scoped to the boundary, touches only the 12-17
+# campaigns that cross it, and leaves the press timeline bit-identical: union
+# press-hours 109,675.79 in both base and split arms.
+#
+# See PARTITION_AND_CHANGEOVER.md section 4aw.
+MONTHEND_FIT = os.environ.get("PLANNER_L5_MONTHEND_FIT", "off")
+MONTHEND_WIN_D = float(os.environ.get("PLANNER_L5_MONTHEND_WIN_D", "7"))
+MONTHEND_STRICT = os.environ.get("PLANNER_L5_MONTHEND_STRICT", "0") == "1"
 # Fraction of an ABSORBER GT's lots deferred behind the rest of the book, so
 # smaller GTs finish earlier and their presses free up sooner. See the block
 # beside its use for the GT 1513 plant-vs-us ramp that motivates it.
@@ -268,6 +391,25 @@ WARM_RELEASE = os.environ.get("PLANNER_L5_WARM_RELEASE", "0") == "1"
 # Bounded to the seats the opening stock actually pays for, so `-qty` is
 # untouched from the first unstocked job onwards. See the block beside the sort.
 STOCK_FIRST = os.environ.get("PLANNER_L5_STOCK_FIRST", "0") == "1"
+# Make the L5 SEAT QUEUE aware that green tyres are already on the floor and are
+# PERISHING. Distinct from STOCK_FIRST above: that one promotes by how many t0
+# seats the stock can PAY FOR and orders the head by -qty; this one promotes the
+# fewest presses that can DRINK the stock inside its own remaining shelf life and
+# orders the head by that shelf life, soonest-to-expire first. See the block
+# beside the sort for the measurement.
+#   "0"  off (ships)            "1"      head ordered by remaining shelf life
+#   "alpha"  head ordered by gt_code     "qty"    head ordered by -qty (§4z's key)
+# `alpha` and `qty` are the NULL CONTROL required by DO-NOT #49: they promote the
+# IDENTICAL set of campaigns and differ only in how that set is ordered among
+# itself, which cannot carry the mechanism. If they move BUILT as much as "1"
+# does, the effect is the greedy re-settling and not the shelf-life preference.
+STOCK_URGENT_MODE = os.environ.get("PLANNER_L5_STOCK_URGENT", "0").strip().lower()
+STOCK_URGENT = STOCK_URGENT_MODE in ("1", "on", "alpha", "qty")
+# Promote only GTs holding more than this many usable tyres. 0 = every GT that
+# holds any. A probe knob for the narrow variant -- never ship a mined value in
+# it (PARTITION §1).
+STOCK_URGENT_MINQ = float(os.environ.get("PLANNER_L5_STOCK_URGENT_MINQ", "0")
+                          or 0.0)
 
 # ---- FULL AVAILABILITY AT t0 (stated planning assumption, B-ASSUME-1) -----
 # PLANT RULING, 2026-08-09: "assume everything is available for building from
@@ -362,8 +504,256 @@ FULL_AVAIL_RAMP = os.environ.get(
 # not validated). PCR has only 3.4 %/4.4 % press slack; there is nothing to level.
 GOV = os.environ.get("PLANNER_L5_TAKT", "flat")         # flat (default) | off
 ALPHA = float(os.environ.get("PLANNER_L5_ALPHA", "1.0"))
+# SHIPPED ON PCR 2026-08-20 (was "TBR"). Two-month, two-plant gate, fresh arms,
+# per-month partition -- Jul PCR BUILT +4,693 / in-month +0.16, Aug PCR +4,985 /
+# +0.27, TBR byte-identical on both months. Weighted build changeover 79.5 FAIL
+# -> 64.3 PASS on July. See PARTITION_AND_CHANGEOVER.md 4am; this overturns
+# 4l.1's July -0.28 pt rejection, which was measured on the pre-PINNED_FIRST,
+# pre-CLOSING_BUFFER, pre-4ab, pre-cavities=2 baseline.
 GOV_PLANTS = {x for x in os.environ.get(
-    "PLANNER_L5_TAKT_PLANTS", "TBR").split(",") if x}
+    "PLANNER_L5_TAKT_PLANTS", "PCR,TBR").split(",") if x}
+
+# ---- THE GOVERNOR ON PCR -- RE-MEASURED 2026-08-20, AND IT WON --------------
+#
+# WHAT THIS DOES / WHY IT EXISTS -- a measured defect in the tail, found
+# 2026-08-20 while investigating "the plan collapses at month end".
+#
+#   Shipped August PCR runs its presses at 100 % occupancy on days 2-10 and
+#   39 % on day 31; building follows it down to 43 %. 12,686 tyres starve as
+#   `no feasible release` while 513 idle building-machine hours sit in d27-31.
+#   Those idle hours are NOT reachable by the starved volume: R5 bounds a build
+#   to [t_cure - 72 h, t_cure - tau_min], so month-wide idle hours say nothing
+#   about whether a run 20 days earlier can be placed (see l7_pull_release.py,
+#   "THE LEGAL BAND IS NOT [t0, ideal]"). The only way to reach tail machine
+#   hours is to move CURE SEATS into the tail, which is this governor's job.
+#
+#   The PCR budget is dominated by the RIM sub-partitions, not by `ALL`:
+#   ALL 81 of 86 presses, but R13 24 of 51, R14 9 of 43, R17 10 of 46. So what
+#   the governor actually prevents is one RIM claiming 51 presses in week one
+#   when the machines allowed on that rim can never feed them.
+#
+# SHIPS OFF (GOV_PLANTS still defaults to "TBR"). MEASURED 2026-08, PCR+TBR,
+# fresh arms via scripts/run_arm.py, gated by scripts/check_arm_fresh.py:
+#
+#   arm                       BUILT    dBUILT   in-month   ful%  starved   L11
+#   TF_base  PCR            409,967        +0    401,222  94.03   12,686  31/48
+#   TAKT_PLANTS=PCR,TBR     414,301    +4,334    399,511  93.63    5,129  32/48
+#   TF_base  TBR             98,003        +0     96,932  98.17    1,654
+#   TAKT_PLANTS=PCR,TBR      98,003        +0     96,932  98.17    1,654   <- byte-identical
+#
+#   PCR build d27-31 as % of interior median: 89/79/57/46/45 -> 101/98/99/97/80.
+#   PCR WEIGHTED build changeover 86.3 -> 73.1 min/machine-day: the ONLY L11
+#   invariant that flips, and it flips to PASS against the 74.0 cap.
+#   PCR same-size share 53.7 -> 65.4 %; last-day GT 1,787 -> 3,931.
+#
+# THE TRAP IN READING IT, AND IT IS THE POINT OF THE EXERCISE:
+#   BUILT by window   d1-2 -416 · interior d3-26 -15,732 · tail d27-31 +18,998.
+#   THE TAIL FILLS PARTLY BY BORROWING FROM THE INTERIOR. Only 4,334 of the
+#   18,998 tyres that appear in the tail are new output; the other 77 % is
+#   interior work relocated. Total build machine-hours used moves 6,772 ->
+#   6,820 of 8,184 -- the gain is real but it is 48 machine-hours wide, not
+#   19,000. This is the mirror image of §4ad / memory `day1-gain-is-borrowed`.
+#   Say it in the headline, never in a footnote.
+#   IN-MONTH FALLS WHILE BUILT RISES: in-month cure 401,222 -> 399,511
+#   (-0.40 pt) because 6,751 more tyres cure in September; total real output
+#   (in-month + tail) is 410,775 -> 415,815, +5,040.
+#   R5 max 61.4 -> 70.3 h against the hard 72 h -- 1.7 h of margin left. A
+#   flatter cure curve holds green tyres longer (same cost §4y found).
+#   Carry-out debt 14.3 h (8,586 tyres) -> 27.1 h (16,285), still PASS <= 72 h.
+#
+# NOT GATED ON JULY. The July partition could not be built in this session, and
+# July is exactly where this flag previously measured -0.28 pt. Do not ship it
+# to defaults until a fresh July arm agrees.
+#
+# ---- PER-PLANT ALPHA AND PER-PLANT SUB-PARTITION ----------------------------
+# `ALPHA` and `PLANNER_L5_TAKT_PART` are PLANT-WIDE, and the two plants do not
+# want the same value. Measured on the same August arms:
+#
+#   arm                                  PCR BUILT   TBR BUILT   PCR in-month
+#   ALPHA=1.00 (TF_taktboth)              +4,334          +0        -0.40 pt
+#   ALPHA=1.05                            +4,071        -791        +0.38 pt
+#   ALPHA=1.10                            +2,412        -989        +0.06 pt
+#   ALPHA=1.20                            +2,932      -2,818        +0.36 pt
+#   ALPHA=0.95                            +1,554         -42        -1.72 pt
+#   TAKT_PART=0 (both plants)             +4,985        -897        +0.27 pt
+#
+# Every non-1.0 alpha and every subpart change is MIXED SIGN across plants,
+# which fails the gate -- because one knob is being asked to serve two plants
+# with different press slack (PCR 3.4-4.4 %, TBR 24 %). These two flags let the
+# knob be set per plant so the mixed sign can be tested away rather than
+# accepted. UNSET, both fall back to the global value, so the shipped plan is
+# byte-identical -- verified as a control arm (TF_ctl vs TF_base and TF_tk_ctl
+# vs TF_taktboth), all six artefacts unchanged in both.
+#
+# WITH THE PER-PLANT FLAG, TBR IS BYTE-IDENTICAL IN EVERY ARM BELOW, so the
+# mixed sign is gone and the whole response is PCR's (2026-08, fresh arms):
+#
+#   alpha_PCR   sub-part ON: dBUILT  d in-month      sub-part OFF: dBUILT  d in-m
+#     0.95           +1,554        -1.72 pt              (0.98)  +3,545  -0.44 pt
+#     1.00           +4,334        -0.40 pt                      +4,985  +0.27 pt
+#     1.01           +4,403        +0.15 pt                      +5,169  +0.58 pt
+#     1.02           +3,618        +0.03 pt                      +2,284  +0.29 pt
+#     1.03           +3,827        +0.13 pt
+#     1.04           +3,337        +0.18 pt
+#     1.05           +4,071        +0.38 pt                        -617  -0.21 pt
+#     1.07           +3,981        +0.44 pt
+#     1.10           +2,412        +0.06 pt
+#     1.20           +2,932        +0.36 pt
+#
+# DO NOT TUNE ALPHA ON THIS TABLE. The response is NOT monotone and not even
+# smooth: with the sub-partition off, 1.01 -> +5,169, 1.02 -> +2,284 and
+# 1.05 -> -617. A 0.04 change of the knob swings BUILT by 5,800 tyres. That is
+# greedy-placement jitter, not an optimum, and picking the argmax of one month
+# is precisely the mined-constant defect class (§1, "a median is not a floor").
+# ALPHA = 1.0 is the only value with a reason: it IS the takt rate, and it is
+# TBR's measured interior maximum on two months. Ship 1.0 or ship nothing.
+#
+# WHAT IS ROBUST IS THE DIRECTION. 17 of the 18 arms with the governor on PCR
+# raise BUILT, and both alpha-1.0 variants survive two perturbed baselines:
+#
+#   baseline                              sub-part OFF   sub-part ON
+#   shipped                                    +4,985        +4,334
+#   PLANNER_L7_CLOSING_BUFFER=0                +5,348        +5,490
+#   PLANNER_LOT_INTERVAL_H=8                   +7,745        +5,820
+#
+# so the gain is not an artefact of the closing buffer (it is LARGER without
+# it -- the buffer was spending idle tail hours the governor then uses better).
+ALPHA_P = {p: float(os.environ.get(f"PLANNER_L5_ALPHA_{p}", "") or ALPHA)
+           for p in ("PCR", "TBR")}
+# SHIPPED AS TBR-ONLY 2026-08-20 (was "PCR,TBR"). The sub-partition governor
+# helps TBR and costs PCR: with it on PCR, Jul BUILT +4,095 vs +4,693 and Aug
+# +4,334 vs +4,985, and August R5 max runs to 70.3 h against the hard 72 --
+# 1.7 h of margin, versus 61.9 h without. PCR's binding scarcity is the RIM
+# sub-partition, not the plant press total, so a second concurrency governor
+# stacked on top over-constrains it. TBR keeps it: measured -3,968 BUILT off.
+TAKT_PART_PLANTS = {x for x in os.environ.get(
+    "PLANNER_L5_TAKT_PART_PLANTS", "TBR").split(",") if x}
+
+# ---- GT/RIM FEED CEILING (PLANNER_L5_FEED_CEIL) --------------------------
+# WHAT THIS DOES / WHY IT EXISTS -- built 2026-08-21 to test a diagnosis, not
+# to ship a belief.
+#
+#   The diagnosis under test: L5 seats more concurrent presses on a rim than
+#   the BUILDING machines eligible for that rim can feed in the window, the
+#   surplus is nominally scheduled, and it starves later in L7. August PCR
+#   starvation is 12,477, of which 55 % `release_before_t0` and 40 %
+#   `r5_shelf_life` -- and PARTITION §4au already proved `r5_shelf_life` is
+#   the WRONG NAME for what it records: the machines are 90-98 % occupied
+#   inside the R5 band while running 70-91 % month-wide, so what is missing is
+#   a CONTIGUOUS hole, not shelf life. Both labels are building-machine
+#   contention.
+#
+#   A DYNAMIC per-(rim, window) ceiling, every term derived from the month's
+#   own data at run time -- no mined constant anywhere (§1):
+#
+#       cure drawn on rim r inside any W-hour window
+#           <=  SLACK x ( eligible building output for r in W
+#                         + R5-usable opening GT stock for r )
+#
+#   `eligible` is the partition + home + rim-lock set L7 ACTUALLY enforces via
+#   `_locked`, never `cap_machine` -- that is ~3x wider and is not what binds.
+#   A machine serving two rims is apportioned by its own booked share, never
+#   counted whole to each (DO-NOT #44: check the resource PER HOLDER).
+#
+# HOW IT DIFFERS FROM THE SHIPPED TAKT GOVERNOR (§4am), which it must not
+# merely re-implement:
+#   takt  = press CONCURRENCY per partition, derived from CURE press-hours vs
+#           span. On PCR it runs on the plant aggregate ALL only
+#           (TAKT_PART_PLANTS defaults to TBR), so it carries NO rim term.
+#   this  = a tyres/hour ceiling per RIM, derived from BUILD-side capability.
+#   The two constrain different resources on different keys.
+#   NOT REDUNDANT, and that is measured, not argued: every arm below ran with
+#   the shipped takt governor ON, and the L5 log shows PCR budgeting exactly one
+#   partition (`PCR ALL`, 81 of 86 presses). The ceiling still moved seats that
+#   takt had already placed. It binds where takt does not. It still ships OFF.
+#
+# =====================================================================
+# SHIPS OFF. MEASURED 2026-08-21, AUGUST ONLY (the partition on disk is stamped
+# 2026-08 and must not be rebuilt), PCR+TBR. Fresh arms via scripts/run_arm.py,
+# all gated FRESH by scripts/check_arm_fresh.py, baseline
+# PLANNER_L7_CLOSING_BUFFER=1 PLANNER_HOLIDAYS=2026-08-15.
+# TBR is BYTE-IDENTICAL in every arm (FEED_PLANTS defaults to PCR).
+#
+#   PCR, demand 429,146          BUILT   dBUILT  in-month   ful%   starved   L11
+#   FC_base                    409,511       +0   397,326  92.59    12,477  32/48
+#   W=72 slack=1.00            407,568   -1,943   393,048  91.59    11,265  33/48
+#   W=24 slack=1.00            410,892   +1,381   397,473  92.62    10,614  32/48
+#   W=72 slack=1.25            410,314     +803   398,135  92.77    11,580  32/48
+#   W=72 slack=1.50            409,511       +0 (inert -- ceiling never binds)
+#
+# THE GATE IT PASSES: the ceiling is NOT vacuous. Recomputed on the realised
+# plan it binds in 37.5 % of 72 h windows, and R16 -- the rim carrying the most
+# starvation (4,363) -- binds in 43 of them (DO-NOT #30, verify a gate binds
+# before building the exact version of it).
+#
+# THE GATE IT FAILS, AND IT IS THE WHOLE RESULT:
+#   THE MEASURED EFFECT IS NOT ATTRIBUTABLE TO THE MECHANISM. It is greedy-
+#   placement jitter, and the null control proves it. At FIXED slack 1.25,
+#   varying only the window width -- a parameter with no physical meaning at
+#   1 h resolution, against a 72 h shelf life:
+#
+#     W (h)        68     70     71     72     73     76
+#     dBUILT     +826   +841   +271   +803    +60    -54
+#     dstarved   -825   -854   -220   -897    -25    +30
+#
+#   mean +458, sd 414, range -54..+841. A ONE-HOUR change swings BUILT by 743
+#   tyres and flips the sign of the starvation delta. The best single arm
+#   (+803) sits inside one sd of the mean of physically equivalent settings.
+#   The slack knob is no better: 1.18 -> +53, 1.20 -> +1,457, 1.22 -> -33,
+#   1.25 -> +803, 1.28 -> inert. NOT MONOTONE, and moving FEWER seats (3 at
+#   slack 1.22) is worse than moving more (8 at 1.20).
+#
+#   The direct action is tiny and the cascade is everything: at slack 1.25 the
+#   ceiling moved ONE seat, and 33 campaign starts moved in response. The
+#   +803 is the greedy re-settling, not 897 tyres of prevented starvation.
+#
+# WHAT IT COSTS WHERE IT "WINS" -- a ceiling refuses seats, so say what it
+# refuses. In-month cure, base -> arm, decomposed per GT:
+#     W=72 slack=1.25   gained 1,153 on  6 GTs   REFUSED   344 on  3 GTs  net +809
+#     W=24 slack=1.00   gained 4,817 on 17 GTs   REFUSED 4,670 on 26 GTs  net +147
+#   The W=24 arm churns 9,487 tyres of cure across 43 GTs to net 147. That is a
+#   coin toss with a large variance, which is exactly what the null control says
+#   it is.
+#
+# ROBUSTNESS (dBUILT PCR) -- survives all three baselines, and it does not
+# matter, because the null control above shows the SAME arm's neighbours do not:
+#     baseline                  W=24 s1.00   W=72 s1.25
+#     shipped                       +1,381         +803
+#     PLANNER_L7_CLOSING_BUFFER=0   +2,146         +897
+#     PLANNER_LOT_INTERVAL_H=8        +950         +421
+#   W=24 turns NEGATIVE on in-month on the LOT_INTERVAL_H=8 baseline (-1,019,
+#   -0.23 pt) while BUILT rises -- BUILT and in-month at different tiers, which
+#   fails the scoring rule on its own.
+#
+# WHY THE VOLUMETRIC PREMISE IS WRONG, which is the transferable lesson:
+#   Month-wide, every PCR rim except R12 has feed headroom (R13 135,871 cure
+#   against 158,472 feedable; R16 37,017 against 49,253). The shortfall is not
+#   volume, it is CONTIGUITY -- §4au measured the eligible machines at 90-98 %
+#   occupancy INSIDE the R5 band while running 70-91 % month-wide, with a
+#   largest free gap of 0.47-1.83 h against a 2-4 h run. A tyres/hour ceiling
+#   cannot see a hole-shape problem, so it refuses seats that were feasible and
+#   leaves the fragmented ones exactly where they were. R13 is the proof: it
+#   starves 2,265 tyres and the ceiling NEVER binds on it (worst excess -223).
+#   Same family as DO-NOT #19 -- do not size a capacity exception off a NOMINAL
+#   load table -- one layer up.
+#
+# The verifier's 2 pre-existing hard violations are unchanged in CLASS on both
+# arms (changeover-not-reserved 12/1269 -> 11/1268; machine-day over 24 h 2 of
+# 597 -> 2 of 599, worst 25.17 -> 25.75 h). No new violation class (§4am).
+#
+# AUGUST ONLY -- NO JULY ARM EXISTS. Even had the response been clean, a knob
+# validated on one month is not validated (§4am, DAY_CAP trap 2).
+# =====================================================================
+FEED_CEIL_DOC = "measured 2026-08-21, jitter-dominated, ships off"
+FEED_CEIL = os.environ.get("PLANNER_L5_FEED_CEIL", "0") == "1"
+FEED_W_H = float(os.environ.get("PLANNER_L5_FEED_W_H", "72"))
+FEED_SLACK = float(os.environ.get("PLANNER_L5_FEED_SLACK", "1.0"))
+# PCR only by default: TBR has a median of 3 eligible machines per GT against
+# PCR's 11 and is already at 97.9 % in-month with 1,654 starved, so there is
+# almost nothing for a feed ceiling to refuse (DO-NOT #15 -- never assume a
+# rule tuned on PCR transfers to TBR).
+FEED_PLANTS = {x for x in os.environ.get(
+    "PLANNER_L5_FEED_PLANTS", "PCR").split(",") if x}
 
 # ---- DAILY CURE-RATE GOVERNOR (PLANNER_L5_DAY_CAP) -----------------------
 # WHAT THIS DOES -- an exploratory probe, built 2026-08-19, SHIPS OFF.
@@ -699,8 +1089,23 @@ def main() -> None:
         plant median only when the press is missing from the master."""
         v = mch_press.get(str(press))
         return (v * 60.0) if v is not None else mch_p[plant]
-    moulds = {(r["plant"], r["gt_code"]): max(int(r["moulds"]), 1)
-              for r in mould.iter_rows(named=True)}
+    # R3 CONCURRENCY. `moulds` counts mould HALVES -- the plant ruling is 2 per
+    # press (LH + RH, one cycle, two tyres). This dict feeds ALL THREE R3 sites
+    # in this module (placement, the split/repair pass, the self-check) and the
+    # divisor is applied exactly once, in r3_cap, which l45 and l11 also read.
+    # Ships at DIV = 1.0 -- `moulds` unchanged, byte-identical.
+    moulds = r3_cap.table(mould.iter_rows(named=True))
+    print(r3_cap.banner())
+    if r3_cap.R3_DIV > 1.0 or r3_cap.R3_OBS:
+        _raw = {(r["plant"], r["gt_code"]): max(int(r["moulds"]), 1)
+                for r in mould.iter_rows(named=True)}
+        for _p in ("PCR", "TBR"):
+            _cut = [(k[1], _raw[k], moulds[k]) for k in _raw
+                    if k[0] == _p and moulds[k] < _raw[k]]
+            print(f"    {_p}: {len(_cut)} of "
+                  f"{sum(1 for k in _raw if k[0] == _p)} GTs capped lower "
+                  f"(e.g. " + ", ".join(f"{g} {a}->{b}" for g, a, b in _cut[:3])
+                  + ")")
     elig: dict[tuple, list[str]] = {}
     for r in press.iter_rows(named=True):
         elig.setdefault((r["plant"], r["gt_code"]), []).append(r["press"])
@@ -752,10 +1157,22 @@ def main() -> None:
     # Per-(plant, GT) cover actually required by earliest_cure's t0 test, so the
     # debit below charges the same currency the test priced. SOLUTIONS S8.
     _gapq_of: dict[tuple, float] = {}
+    # Remaining shelf life of each GT's opening stock, hours from t0. DERIVED AT
+    # RUN TIME FROM THE STOCK'S OWN age_h -- never a mined constant (PARTITION
+    # §1). The MEDIAN age is used because that is the wall L7 actually applies
+    # (`opening_life` in l7_pull_release), and pricing a preference in a
+    # different currency from the consumer that spends it is how the `gap_q`
+    # debit came to over-charge by 5.4x (see `gap_q_of` below).
+    _stock_life: dict[tuple, float] = {}
     if ogf.exists():
         for r in (pl.read_parquet(ogf).filter(pl.col("age_h") <= GT_SHELF_LIFE_H)
-                  .group_by(["plant", "gt_code"]).len().iter_rows(named=True)):
+                  .group_by(["plant", "gt_code"])
+                  .agg(pl.len().alias("len"),
+                       pl.col("age_h").median().alias("_amed"))
+                  .iter_rows(named=True)):
             early_budget[(r["plant"], r["gt_code"])] = float(r["len"])
+            _stock_life[(r["plant"], r["gt_code"])] = max(
+                0.0, GT_SHELF_LIFE_H - float(r["_amed"]))
     # Tyres of stock needed to bridge the floor on ONE press: the press draws
     # `rate` tyres/h and must last `tau* + band` hours until fresh supply lands.
     gap_tyres = {p: (tau_h[p] + bband[p]) * (cav_p[p] * 3600.0 / cyc_p[p])
@@ -804,9 +1221,12 @@ def main() -> None:
     # It ships OFF anyway, by instruction. `PLANNER_PRESS_AVAIL` still overrides,
     # so `PLANNER_PRESS_AVAIL=0.8897` restores the old PCR behaviour for an A/B,
     # and a per-plant dict is the obvious next step if the plant wants TBR-only.
-    _av = os.environ.get("PLANNER_PRESS_AVAIL", "")
-    _pav = ({p: float(_av) for p in ("PCR", "TBR")} if _av else
-            {p: 1.0 for p in ("PCR", "TBR")})
+    # RESOLVED IN ONE PLACE -- `plant_ct.PRESS_AVAIL`. This site used to re-read
+    # PLANNER_PRESS_AVAIL itself and L4.5 re-read it a second time; two copies of
+    # a rate input is how L4.5 came to size lots against a slower press than L5
+    # seats them on. `PLANNER_PRESS_AVAIL` still overrides both plants;
+    # `PLANNER_PRESS_AVAIL_PCR` / `_TBR` move one plant alone. Ships 1.0 / 1.0.
+    _pav = dict(plant_ct.PRESS_AVAIL)
     PCT = plant_ct.get(_pav)
     print("  " + PCT.summary())
 
@@ -845,6 +1265,31 @@ def main() -> None:
         """
         r = PCT.press_rate(p, gt)
         return r if r else rate_p[p]
+
+    # ---- CURE-TIME COVERAGE, PRINTED, NEVER SILENT ----------------------
+    # A GT the plant's cure-time workbook does not name falls back to
+    # `rate_p[p]`, the plant MEDIAN over the GTs it does name. That fallback is
+    # correct -- a crash would be worse -- but it is invisible, and an invisible
+    # plant median standing in for a per-GT figure is exactly how tau* and
+    # min_lot got wired in (PARTITION §1). So say which GTs get one, and how many
+    # tyres ride on it, every run.
+    _nocov: dict[str, list[tuple[str, float]]] = {"PCR": [], "TBR": []}
+    for _r in pl.read_parquet(
+            D / f"net_requirement_{a.month}.parquet").iter_rows(named=True):
+        if _r.get("residual"):
+            continue
+        if PCT.press_rate(_r["plant"], _r["gt_code"]) is None:
+            _nocov[_r["plant"]].append((_r["gt_code"],
+                                        float(_r.get("cure_requirement") or 0)))
+    for _p in ("PCR", "TBR"):
+        _miss = sorted(_nocov[_p], key=lambda x: -x[1])
+        if _miss:
+            print(f"  [cure CT] {_p}: {len(_miss)} demanded GTs have NO plant "
+                  f"cure time -> plant-median fallback {rate_p[_p]:.3f} "
+                  f"t/press-h for {sum(q for _g, q in _miss):,.0f} tyres  "
+                  + ", ".join(f"{g} ({q:,.0f})" for g, q in _miss[:4]))
+        else:
+            print(f"  [cure CT] {_p}: every demanded GT has a plant cure time")
 
     def gap_q_of(p: str, gt: str) -> float:
         """Tyres of opening stock that buy this GT ONE t0 press seat.
@@ -885,6 +1330,62 @@ def main() -> None:
     #
     # This asserts NO pre-month building. It only replaces one plant-wide median
     # with each GT's own place in the build queue.
+    # ---- WHICH GTs CAN BUILDING ACTUALLY START AT t0? --------------------
+    # One machine builds one GT at a time, so the number of GTs that can be fed
+    # from minute zero is bounded by the machine count, not by press count. Walk
+    # GTs by volume, claim an allowable machine for each, stop when they run out.
+    # Everything claimed gets tau_min in `earliest_cure`; the rest keep the wall.
+    _feed_early: set = set()
+    _early_cap: dict = {}
+    if FLOOR_BASIS == "feed":
+        _cmf2 = D / f"cap_machine_{a.month}.parquet"
+        if _cmf2.exists():
+            _cm2 = pl.read_parquet(_cmf2)
+            try:
+                _cm2 = allowable.restrict(_cm2, quiet=True)
+                _cm2 = allowable.restrict_rimlock(_cm2, quiet=True)
+            except Exception:                                    # noqa: BLE001
+                pass
+            _elig2: dict = {}
+            for _r in _cm2.iter_rows(named=True):
+                _elig2.setdefault((_r["plant"], _r["gt_code"]), []).append(_r["machine"])
+            _vol2 = {(r["plant"], r["gt_code"]): float(r["qty"])
+                     for r in lots.group_by(["plant", "gt_code"]).agg(
+                         (pl.col("lot_qty") * pl.col("n_lots")).sum().alias("qty")
+                     ).iter_rows(named=True)}
+            # ---- THE CAP IS PRESSES, NOT GTs. Measured 2026-08-20. -----------
+            # Claiming one machine per GT limited the GT count to 11 and the
+            # PRESS count barely moved (47 -> 44), because one GT opens as many
+            # presses as it has moulds. A 20-mould GT on one machine draws
+            # 20 x 7.2 = 144 tyres/h against the ~60 tyres/h that machine makes,
+            # so it starves by arithmetic. BUILT still fell 5,105 on August PCR.
+            #
+            # So bound each early GT to the presses its OWN machines can feed:
+            #     presses_feedable = machines x (machine tyres/h) / (press tyres/h)
+            # and hand that number to the seating loop as a hard concurrency cap
+            # for t0. This is the feed balance, not a preference.
+            _mrate = {q: 3600.0 / (plant_cad_s[q] or 60.0) for q in ("PCR", "TBR")}
+            for _p2 in ("PCR", "TBR"):
+                _taken: set = set()
+                _cands = sorted((k for k in _vol2 if k[0] == _p2),
+                                key=lambda k: (-_vol2[k], k[1]))
+                _pr = max(rate_p[_p2], 1e-9)
+                # ONE machine per GT, round-robin by volume. Claiming every
+                # eligible machine for the first GT gave 4 GTs and a 81-press cap
+                # -- larger than the plant. One machine each spreads the early
+                # release across the GTs that will actually be seated first.
+                for _k2 in _cands:
+                    _mine = [m for m in sorted(_elig2.get(_k2, [])) if m not in _taken]
+                    if not _mine:
+                        continue
+                    _taken.add(_mine[0])
+                    _feed_early.add(_k2)
+                    _early_cap[_k2] = max(1, int(_mrate[_p2] / _pr))
+                _ng = sum(1 for k in _feed_early if k[0] == _p2)
+                _np = sum(v for k, v in _early_cap.items() if k[0] == _p2)
+                print(f"  [feed] {_p2}: {len(_taken)} machines -> {_ng} GTs at tau_min "
+                      f"({tau_min_h[_p2]*60:.0f} min), capped at {_np} concurrent "
+                      f"presses total ({_mrate[_p2]:.0f} build vs {_pr:.1f} cure tyres/h)")
     _stag: dict[tuple, float] = {}
     if FLOOR_BASIS == "stagger":
         _cmf = D / f"cap_machine_{a.month}.parquet"
@@ -1090,6 +1591,35 @@ def main() -> None:
         # THIS GT), per-GT. Until that exists, ship the conservative wall.
         if WARM_RELEASE and (plant, gt) in _warm:
             return t0 + timedelta(hours=tau_min_h[plant])
+        # ---- FEED-CHECKED EARLY RELEASE (PLANNER_L5_FLOOR_BASIS=feed) --------
+        #
+        # `slice` releases EVERY press at tau_min. Measured 2026-08-20: day 1
+        # does exactly what the physics predicts (Aug PCR cure 7,902 -> 12,961,
+        # press util 55 -> 88 %, presses at t0 20 -> 47) and the MONTH loses on
+        # all four cells (BUILT -3,885 / -1,787 / -7,088 / -1,501, starvation
+        # 18,311 -> 26,183). §4ad has the day-by-day decomposition.
+        #
+        # THE REASON IS NOT THE RELEASE TIME. It is that 47 presses want 47
+        # DIFFERENT GTs at t0 and PCR has 11 building machines, with 32.6 % of
+        # volume locked to 1-2 of them. A machine builds ONE GT at a time, so
+        # the 12th GT released early is a press with no feeder.
+        #
+        # So release early only as WIDE as building can actually feed at t0:
+        # walk the GTs by volume, give each one a machine it is allowed on, and
+        # stop when the machines run out. Those GTs get tau_min; every other GT
+        # keeps the conservative wall. This is the "tau_min + time until building
+        # can reach THIS GT" rule the comment above asks for, in its cheapest
+        # form -- reachable now means a free machine at t0.
+        #
+        # The B12 build-RUN floor already guarantees the other half of the
+        # user's model: once building starts a GT it runs at least min_lot
+        # (PCR 150 / TBR 70) before a changeover, so a released press is fed
+        # continuously, not for one slice. Verified on the shipped plan:
+        # 0 of 792 PCR and 0 of 514 TBR build runs are below floor.
+        if FLOOR_BASIS == "feed":
+            return t0 + timedelta(
+                hours=(tau_min_h[plant] if (plant, gt) in _feed_early
+                       else tau_h[plant] + bband[plant]))
         if FLOOR_BASIS == "star":
             return t0 + timedelta(hours=tau_h[plant] + bband[plant])
         if FLOOR_BASIS == "slice":
@@ -1637,6 +2167,173 @@ def main() -> None:
                   f"of the queue (PCR {_np['PCR']} / TBR {_np['TBR']}) -- each "
                   f"holds >= gap_q of opening stock; -qty order kept elsewhere")
 
+    # ---- L5 IS GT-INVENTORY-AWARE (PLANNER_L5_STOCK_URGENT) --------------
+    #
+    # WHAT THIS DOES / WHY IT EXISTS -- a measured defect, found 2026-08-21
+    #   Opening GT stock is loaded, partly consumed, and the remainder silently
+    #   expires. August: PCR holds 5,132 usable tyres at t0 and consumes 3,453;
+    #   TBR holds 1,266 and consumes 794. 1,679 + 472 tyres of already-built,
+    #   in-shelf-life green die on the floor.
+    #
+    #   The mechanism is the SEAT QUEUE, not the quantity. L4 already nets stock
+    #   out of `cure_requirement` via `from_stock`, so the quantity is right;
+    #   only the TIMING is wrong. This sort is `(plant, _late, -qty, gt_code,
+    #   seq)` and `_late` is constant 0 unless BACKLOAD is set, so the effective
+    #   order is pure descending quantity. NOTHING IN THE KEY KNOWS STOCK
+    #   EXISTS. A small GT sorts late, its first campaign lands on day 13-30,
+    #   and tyres that were legal on arrival (August age p50 6-15 h, max 55 h,
+    #   ZERO rows over 72 h) are 300-700 h old by the time a press wants them.
+    #
+    # THE PROMOTION IS BOUNDED BY WHAT THE STOCK CAN PHYSICALLY BE DRUNK BY.
+    #   n = ceil( stock / (remaining shelf life x that GT's own press rate) )
+    #   -- the FEWEST presses that can consume this stock before it expires --
+    #   capped by R3 moulds and eligible presses. Every term is this month's
+    #   own: the life comes from the stock's `age_h`, the rate from the plant's
+    #   cure-time workbook. No mined constant (PARTITION §1).
+    #
+    #   That bound is what separates it from PLANNER_L5_STOCK_FIRST (§4z), which
+    #   promoted `stock // gap_q` campaigns -- gap_q is ~86 tyres on PCR, so a
+    #   GT holding 661 bought up to 5 seats there and buys 2 here. §4z lost
+    #   BUILT 4,337 PCR / 599 TBR on July because a promoted campaign burned its
+    #   gap_q of cover in HOURS and then needed green that could not be released
+    #   before t0 (DO-NOT #37: the t0 window is a shared build-feed resource).
+    #   Sizing the promotion on the stock's own DRAW TIME instead of on seat
+    #   COUNT is the direct answer to that failure mode -- and it is a
+    #   re-measurement of a rejected family, so it is defaulted OFF and gated on
+    #   BUILT, not on how much stock it collects.
+    #
+    # ORDERING inside the head is by remaining shelf life ASCENDING -- soonest
+    # to expire first -- then the shipped key unchanged. `-qty` is PREFIXED for
+    # the promoted jobs only and is untouched for every other job, which is the
+    # distinction that separates this from PLANNER_D1_DEPTH (-11.9 pt) and
+    # PLANNER_L5_EDD (-3.8 pt), both of which displaced `-qty` globally.
+    #
+    # =====================================================================
+    # SHIPS OFF. MEASURED 2026-08-21, AUGUST 2026, BOTH PLANTS.
+    # THE MECHANISM DELIVERS ITS OBJECTIVE COMPLETELY AND THE NUMBER IS NOISE.
+    # =====================================================================
+    # Arms fresh via `scripts/run_arm.py`, all nine gated FRESH by
+    # `check_arm_fresh.py`. Partition stamped 2026-08, sha1 809beda91344.
+    # `PLANNER_HOLIDAYS=2026-08-15` pinned on every arm (the August holiday
+    # master is not in the tree; an unpinned arm silently drops the closure).
+    # Baseline = the shipped SHIP2_aug configuration (`CLOSING_BUFFER=1`),
+    # reproduced byte-identically on all seven plan parquets.
+    #
+    #   PCR, demand 429,146
+    #   arm                     BUILT   dBUILT  in-month   ful%  stkEXP  addr   starved   L11
+    #   SP_base   off         409,511       +0   397,326  92.59   1,679  1,023   12,477  32/48
+    #   SP_su_1   life-order  410,089     +578   399,655  93.13     656      0   10,755  32/50
+    #   SP_su_alpha gt-order  404,787   -4,724   395,596  92.18     743     87   15,040  32/50
+    #   SP_su_qty  -qty-order 407,325   -2,186   397,623  92.65     743     87   13,589  32/50
+    #   SP_q8     minq=8      408,243   -1,268   398,568  92.87     664      8   12,035  31/50
+    #
+    #   TBR, demand 99,019
+    #   SP_base   off          98,003       +0    96,932  97.89     472    232    1,654  32/48
+    #   SP_su_1   life-order   97,265     -738    97,415  98.38     240      0    2,276  32/50
+    #   SP_su_alpha gt-order   97,368     -635    97,361  98.33     240      0    2,080  32/50
+    #   SP_su_qty  -qty-order  96,813   -1,190    96,766  97.72     240      0    2,412  32/50
+    #   SP_q3/q8  minq>=3      96,992   -1,011    96,835  97.79     240      0    2,362  32/50
+    #
+    # WHAT IT ESTABLISHES
+    #   1. THE DEFECT IS REAL AND THE FIX FIXES IT. Addressable expired stock
+    #      goes 1,023 -> 0 PCR and 232 -> 0 TBR; consumption 3,453 -> 4,476 and
+    #      794 -> 1,026. Both new L11 invariants go FAIL -> PASS. 24 PCR
+    #      campaigns on 19 GTs and 20 TBR on 20 GTs are promoted.
+    #   2. AND THE VOLUME IS NOISE. `alpha` and `qty` promote the IDENTICAL set
+    #      of campaigns and differ only in the order of that set among itself --
+    #      they collect the same stock (expired 743 vs 656 PCR; 240 on TBR in
+    #      all three) -- yet PCR BUILT spans -4,724..+578, a range of 5,302 with
+    #      sd 2,059 over the five settings. The +578 sits INSIDE one sd of the
+    #      mean (-1,074) of settings that are equivalent on the objective.
+    #   3. THE SHARPEST NULL: `MINQ=8` drops ONE GT holding EIGHT tyres of stock
+    #      -- 0.16 % of the PCR opening floor and 2.6 % of the 311.5-tyre B12
+    #      cure floor -- and PCR BUILT moves +578 -> -1,268, a 1,846-tyre swing
+    #      that flips the sign, with L11 32 -> 31. Dropping the 3-tyre TBR GT
+    #      (MINQ=3) moves TBR in-month +483 -> -97. Textbook DO-NOT #49: the
+    #      effect is the greedy re-settling, not the preference.
+    #   4. TBR BUILT IS NEGATIVE IN EVERY ARM (-635..-1,190). Mixed sign across
+    #      plants fails the ship gate on its own (DO-NOT #14), and it is the
+    #      SIXTH loss in the early-release family after §4z's list.
+    #   5. THE +2,329 PCR IN-MONTH IS NOT +2,329 TYRES. It decomposes as +578
+    #      BUILT + 1,023 extra opening stock consumed + 1,081 of carry-out tail
+    #      pulled inside the boundary (12,620 -> 11,539). Reading in-month alone
+    #      this is +0.54 pt and looks like one of the best August arms of the
+    #      project. It is not -- 74 % of it is relocation and stock draw.
+    #
+    # THE TRAP IN READING THIS TABLE: `stkEXP`/`addr` improve in EVERY arm,
+    # including the two that destroy 2,186 and 4,724 tyres. Opening-stock
+    # recovery and BUILT are decoupled here -- do not use the first as evidence
+    # for the second. §4z is the same shape one lever along.
+    #
+    # WHERE THE COST LANDS. Weighted setup 458.6 -> 496.1 h PCR (+8.2 %) and
+    # 94.2 -> 96.3 h TBR; PCR same-size 70.5 -> 70.2 %; TBR lot p50 122 -> 111.
+    # The promoted campaigns are small, so promoting them fragments the press
+    # calendar and buys 19 extra mould mounts. GT inventory stays inside the
+    # rail (PCR daily-mean max 4,522 -> 4,533 of 4,800; TBR 1,313 -> 1,323 of
+    # 1,400), sub-floor run share stays 0.0 % on both plants, R5 max PCR
+    # 63.3 -> 67.4 h and TBR 71.7 -> 66.7 h, and the independent verifier
+    # reports the SAME TWO pre-existing hard violations with no new class
+    # (transitions 12/1269 -> 11/1365, machine-days over 24 h 2 -> 1).
+    #
+    # NOT BUILT, AND THE REASON IS MEASURED, NOT ASSUMED -- the "seat an early
+    # SLICE sized to the stock and leave the remainder" design. Two independent
+    # refutations on August, taken before writing it (DO-NOT #30):
+    #   * B12. The August cure-lot floor is PCR 311.5 / TBR 85.7. Ten of the
+    #     eleven addressable GTs hold LESS than that (PCR 167/91/87/9/8, TBR
+    #     63/61/39/35/34), so a stock-sized slice is a sub-floor campaign by
+    #     construction. Only `GT  T1457 STAR` (661) clears it.
+    #   * GEOMETRY. On the realised plan, the largest contiguous free window on
+    #     ANY eligible press inside the stock's own remaining life is 7.4 h on
+    #     PCR against a 57.1 h need, and ZERO of the eligible presses for those
+    #     four GTs are free at all in the first 33-64 h (August PCR presses run
+    #     94.5 % occupied). TBR has room -- 50.7 h windows -- but only 171 tyres
+    #     of reach, a fifth of the noise floor. A repair pass can only take an
+    #     occupied window by EVICTION, which is §4bc and is not this change.
+    # The reordering above is therefore the only legal shape of this lever: it
+    # does not need a free window, it takes the seat by displacement.
+    if STOCK_URGENT and EARLY_STOCK:
+        _need: dict[tuple, int] = {}
+        for _k, _q in early_budget.items():
+            _life = _stock_life.get(_k, 0.0)
+            if _q <= STOCK_URGENT_MINQ or _life <= 0.0:
+                continue
+            _r = rate_of(_k[0], _k[1])
+            _need[_k] = min(max(1, math.ceil(_q / max(_life * _r, 1e-9))),
+                            moulds.get(_k, 1), len(elig.get(_k, ())) or 1)
+        _head, _rest = [], []
+        for _j in jobs:
+            _k = (_j["plant"], _j["gt_code"])
+            if _need.get(_k, 0) > 0:
+                _need[_k] -= 1
+                _head.append(_j)
+            else:
+                _rest.append(_j)
+        if _head:
+            if STOCK_URGENT_MODE == "alpha":
+                _head.sort(key=lambda j: (j["plant"], j["gt_code"], j["seq"]))
+            elif STOCK_URGENT_MODE == "qty":
+                _head.sort(key=lambda j: (j["plant"], -j["qty"],
+                                          j["gt_code"], j["seq"]))
+            else:
+                _head.sort(key=lambda j: (
+                    j["plant"],
+                    round(_stock_life.get((j["plant"], j["gt_code"]), 0.0), 3),
+                    -j["qty"], j["gt_code"], j["seq"]))
+            # Plant stays the outermost group -- the placement loop is one pass
+            # over both plants and every later report reads it in plant order.
+            jobs = [_j for _p in ("PCR", "TBR") for _grp in (_head, _rest)
+                    for _j in _grp if _j["plant"] == _p]
+            for _p in ("PCR", "TBR"):
+                _hp = [_j for _j in _head if _j["plant"] == _p]
+                if not _hp:
+                    continue
+                _gts = sorted({(_stock_life.get((_p, _j["gt_code"]), 0.0),
+                                _j["gt_code"]) for _j in _hp})
+                print(f"  [stock-urgent:{STOCK_URGENT_MODE}] {_p}: {len(_hp)} campaigns on "
+                      f"{len(_gts)} GTs promoted, soonest-to-expire first  "
+                      + ", ".join(f"{g} ({lh:.0f}h)" for lh, g in _gts[:5])
+                      + (" ..." if len(_gts) > 5 else ""))
+
     gt_total: dict[tuple, float] = {}
     for _j in jobs:
         k = (_j["plant"], _j["gt_code"])
@@ -1762,7 +2459,10 @@ def main() -> None:
 
     def _pkeys(pl_: str, gt: str) -> list:
         ks = [(pl_, "ALL")]
-        if not SUBPART:
+        # PLANNER_L5_TAKT_PART_PLANTS lets one plant keep its sub-partition
+        # while the other runs on `ALL` alone. Default is both plants, i.e.
+        # exactly what SUBPART did on its own.
+        if not SUBPART or pl_ not in TAKT_PART_PLANTS:
             return ks
         if pl_ == "TBR" and _gt_grp.get((pl_, gt)):
             ks.append((pl_, _gt_grp[(pl_, gt)]))
@@ -1786,15 +2486,16 @@ def main() -> None:
     _budget: dict[tuple, int] = {}
     for _k, _w in _work.items():
         _u = max(NH - _floor_h[_k[0]], 1.0)
-        _n = int(math.ceil(ALPHA * _w / _u - 1e-9))
+        _n = int(math.ceil(ALPHA_P[_k[0]] * _w / _u - 1e-9))
         _budget[_k] = max(1, min(len(_pset.get(_k, ())) or 1, _n))
     _cnt: dict[tuple, list] = {k: [0] * NH for k in _budget}
     _takt_moved = [0]
     _takt_nowin = [0]
     if GOV != "off":
         print(f"  TAKT  level-loaded press-concurrency budget "
-              f"(mode={GOV} alpha={ALPHA} plants={','.join(sorted(GOV_PLANTS))}"
-              f" subpart={int(SUBPART)})")
+              f"(mode={GOV} alpha={'/'.join(f'{p}={ALPHA_P[p]:g}' for p in ('PCR', 'TBR'))}"
+              f" plants={','.join(sorted(GOV_PLANTS))}"
+              f" subpart={int(SUBPART)}:{','.join(sorted(TAKT_PART_PLANTS))})")
         print(f"    {'partition':<14}{'work press-h':>14}{'level n':>10}"
               f"{'budget N':>10}{'presses':>9}")
         for _k in sorted(_budget):
@@ -1827,6 +2528,177 @@ def main() -> None:
                 return max(st, t0 + timedelta(hours=h))
             h = bad + 1                               # jump past the blockage
         return None
+
+    # ================= GT/RIM FEED CEILING ================================
+    # See the PLANNER_L5_FEED_CEIL block at the top of this module. Every term
+    # here is derived from THIS month's masters at run time; nothing is mined
+    # into a constant (§1 -- a median is not a floor).
+    #
+    # ELIGIBILITY IS L7'S, NOT `cap_machine`'s. `_locked` in l7_pull_release.py
+    # resolves the partition first, then the GT's home machines, then the rim
+    # lock. Reproduced here in that order. Using `cap_machine` instead would
+    # widen the set ~3x and the ceiling would never bind.
+    _feed_rate: dict[tuple, float] = {}       # (plant, rim) -> tyres/hour
+    _feed_stock: dict[tuple, float] = {}      # (plant, rim) -> R5-usable stock
+    _feed_q: dict[tuple, list] = {}           # (plant, rim) -> hourly cure draw
+    _feed_pre: dict[tuple, list] = {}         # prefix sums of the above
+    _feed_moved = [0]
+    _feed_nowin = [0]
+    if FEED_CEIL:
+        _part_of: dict[tuple, list] = {}
+        _pf_f = SRC_INP / "gt_machine_partition.parquet"
+        if _pf_f.exists():
+            for _r in pl.read_parquet(_pf_f).iter_rows(named=True):
+                _part_of.setdefault((_r["plant"], _r["gt_code"]), []).append(
+                    _r["machine"])
+        _home_of: dict[tuple, list] = {}
+        _hf_f = SRC_INP / "gt_home_machine.parquet"
+        if _hf_f.exists():
+            for _r in (pl.read_parquet(_hf_f).sort(["plant", "gt_code", "rank"])
+                       .iter_rows(named=True)):
+                _home_of.setdefault((_r["plant"], _r["gt_code"]), []).append(
+                    _r["machine"])
+        _lock_f: dict[tuple, list] = {}
+        _lf_f = SRC_INP / "machine_rim_lock.parquet"
+        if _lf_f.exists():
+            _tr = {"hard": 0, "primary": 1, "flex": 2}
+            _tmp: dict[tuple, list] = {}
+            for _r in pl.read_parquet(_lf_f).iter_rows(named=True):
+                _tmp.setdefault((_r["plant"], str(_r["locked_rim"])), []).append(
+                    (_tr.get(str(_r["tier"]).lower(), 3), int(_r["rank"]),
+                     _r["machine"]))
+            for _k, _v in _tmp.items():
+                _lock_f[_k] = [m for _a, _b, m in sorted(_v)]
+
+        def _elig_mach(p_: str, gt_: str) -> list:
+            """L7 `_locked`, minus the budgeted rim-spill flex machine."""
+            _rm = _rim.get(gt_, "")
+            _pm = _part_of.get((p_, gt_))
+            if _pm:
+                return _pm + [m for m in _lock_f.get((p_, _rm), [])
+                              if m not in _pm]
+            _hm = _home_of.get((p_, gt_), [])
+            return _hm + [m for m in _lock_f.get((p_, _rm), []) if m not in _hm]
+
+        # Machine load per (machine, rim) from the month's OWN requirement, so a
+        # machine shared by two rims is apportioned by what it actually owes
+        # each -- never counted whole to both (DO-NOT #44).
+        _mload: dict[str, float] = {}
+        _mrload: dict[tuple, float] = {}
+        _mrrate: dict[tuple, list] = {}
+        for _j in jobs:
+            _p, _g = _j["plant"], _j["gt_code"]
+            if _p not in FEED_PLANTS:
+                continue
+            _rr = _rim.get(_g, "")
+            if not _rr:
+                continue
+            _ms = _elig_mach(_p, _g)
+            if not _ms:
+                continue
+            _ct_s = PCT.build_ct_s(_p, _g, None) or plant_cad_s[_p]
+            _h = _j["qty"] * _ct_s / 3600.0            # build hours this job needs
+            for _m in _ms:
+                _mload[_m] = _mload.get(_m, 0.0) + _h / len(_ms)
+                _mrload[(_m, _rr)] = _mrload.get((_m, _rr), 0.0) + _h / len(_ms)
+                _mrrate.setdefault((_p, _rr), []).append(3600.0 / _ct_s)
+        for (_m, _rr), _h in _mrload.items():
+            _sh = _h / _mload[_m] if _mload.get(_m) else 0.0
+            for _p in FEED_PLANTS:
+                _rates = _mrrate.get((_p, _rr))
+                if not _rates:
+                    continue
+                _avg = sum(_rates) / len(_rates)       # tyres per machine-hour
+                _feed_rate[(_p, _rr)] = _feed_rate.get((_p, _rr), 0.0) + _sh * _avg
+        # R5-usable opening stock per rim -- `early_budget` is already filtered
+        # to age_h <= GT_SHELF_LIFE_H, so it is the usable population, not the
+        # whole floor (§4p.1: "the GT holds stock" is not "stock is spare").
+        for (_p, _g), _q in early_budget.items():
+            _rr = _rim.get(_g, "")
+            if _rr and _p in FEED_PLANTS:
+                _feed_stock[(_p, _rr)] = _feed_stock.get((_p, _rr), 0.0) + _q
+        for _k in _feed_rate:
+            _feed_q[_k] = [0.0] * NH
+            _feed_pre[_k] = [0.0] * (NH + 1)
+        print(f"  FEED CEILING  per-(rim, {FEED_W_H:.0f} h window) build-feed cap "
+              f"(slack={FEED_SLACK:g} plants={','.join(sorted(FEED_PLANTS))})")
+        print(f"    {'rim':<10}{'feed t/h':>10}{'per window':>12}"
+              f"{'R5 stock':>10}{'month cure':>12}")
+        _mq: dict[tuple, float] = {}
+        for _j in jobs:
+            _rr = _rim.get(_j["gt_code"], "")
+            if _rr and _j["plant"] in FEED_PLANTS:
+                _mq[(_j["plant"], _rr)] = _mq.get((_j["plant"], _rr), 0.0) + _j["qty"]
+        for _k in sorted(_feed_rate):
+            print(f"    {_k[0] + ' ' + _k[1]:<10}{_feed_rate[_k]:>10.1f}"
+                  f"{_feed_rate[_k] * FEED_W_H:>12,.0f}"
+                  f"{_feed_stock.get(_k, 0.0):>10,.0f}{_mq.get(_k, 0.0):>12,.0f}")
+        print()
+
+    def _feed_win_ok(k: tuple, h0: int, n: int, rate_: float) -> int:
+        """-1 if placing `rate_` t/h over hours [h0, h0+n) keeps EVERY W-window
+        on this rim under its ceiling; otherwise the first offending window
+        start.  Window sums come from a prefix array, so this is O(W + n)."""
+        cap_h = _feed_rate.get(k, 0.0) * FEED_SLACK
+        if cap_h <= 0:
+            return -1
+        w = max(1, int(FEED_W_H))
+        pre, stock = _feed_pre[k], _feed_stock.get(k, 0.0)
+        lo = max(0, h0 - w + 1)
+        hi = min(NH - w, h0 + n - 1)
+        for ws in range(lo, hi + 1):
+            we = ws + w
+            base = pre[we] - pre[ws]
+            ov = max(0, min(h0 + n, we) - max(h0, ws))
+            # The stock credit is spent, not renewed: only windows that START
+            # inside the shelf life of the opening floor may count it.
+            _st = stock if ws * 1.0 <= GT_SHELF_LIFE_H else 0.0
+            if base + ov * rate_ > cap_h * w + _st + 1e-6:
+                return ws
+        return -1
+
+    def _feed_free(pl_: str, gt: str, st: datetime, dur: timedelta,
+                   rate_: float):
+        """Earliest start >= st at which this campaign's own draw keeps every
+        W-hour window on its rim inside the build-feed ceiling.  None => no such
+        window; the caller places UNGOVERNED (a shape preference must never
+        become lost demand -- the same fence takt and the day cap carry)."""
+        if not FEED_CEIL or pl_ not in FEED_PLANTS:
+            return st
+        k = (pl_, _rim.get(gt, ""))
+        if k not in _feed_rate:
+            return st
+        n = max(1, int(dur.total_seconds() // 3600) + 1)
+        if n > NH:
+            return st
+        h = max(0, int((st - t0).total_seconds() // 3600))
+        for _ in range(NH + 2):                        # bounded, one jump/window
+            if h + n > NH:
+                return None
+            bad = _feed_win_ok(k, h, n, rate_)
+            if bad < 0:
+                return max(st, t0 + timedelta(hours=h))
+            h = bad + max(1, int(FEED_W_H))            # jump past the full window
+        return None
+
+    def _feed_commit(pl_: str, gt: str, st: datetime, en: datetime,
+                     rate_: float) -> None:
+        """Charge the seat's hourly cure draw, at the SAME chokepoint every
+        other ledger uses. A governor whose ledger misses a commit site stops
+        describing the plan (§4l.3, DO-NOT #25)."""
+        if not FEED_CEIL:
+            return
+        k = (pl_, _rim.get(gt, ""))
+        if k not in _feed_q:
+            return
+        h0 = max(0, int((st - t0).total_seconds() // 3600))
+        h1 = min(NH, int((en - t0).total_seconds() // 3600) + 1)
+        q = _feed_q[k]
+        for x in range(h0, h1):
+            q[x] += rate_
+        pre = _feed_pre[k]
+        for x in range(NH):
+            pre[x + 1] = pre[x] + q[x]
 
     # ================= DAILY CURE-RATE GOVERNOR ===========================
     # See the PLANNER_L5_DAY_CAP block at the top of this module for what this
@@ -1895,6 +2767,12 @@ def main() -> None:
         # property the docstring above claims for the takt profile. Adding a
         # second commit site for the day cap would reintroduce the defect that
         # docstring exists to prevent, so the two ledgers share this one.
+        # ---- FEED-CEILING LEDGER, charged at the SAME chokepoint ----------
+        # Every seat -- governed, ungoverned, split-to-fit and backfill --
+        # passes through here, which is the whole reason the takt and day-cap
+        # ledgers live at this site rather than at their own consult points.
+        if FEED_CEIL:
+            _feed_commit(pl_, gt, st, en, rate_of(pl_, gt))
         if DAY_CAP.get(pl_, 0.0) > 0:
             _r = rate_of(pl_, gt)
             h0f = max(0.0, (st - t0).total_seconds() / 3600.0)
@@ -1993,6 +2871,45 @@ def main() -> None:
         _k = (_j['plant'], _j['gt_code'])
         _pending[_k] = _pending.get(_k, 0.0) + float(_j['qty'])
         _gt_total[_k] = _gt_total.get(_k, 0.0) + float(_j['qty'])
+
+    # ---- MONTH-END COMPLETABILITY (PLANNER_L5_MONTHEND_FIT) -------------
+    # Window start for the boundary preference. `_me_on` false => `_fits` below
+    # is the constant 0, so the candidate key is character-for-character the
+    # shipped one and the layer is byte-identical. Proven, not assumed:
+    # ME_pref7/ME_pref5/ME_pref10 are byte-identical to ME_base on all 7
+    # parquets (see the measurement block at the key).
+    _me_on = MONTHEND_FIT in ("prefer", "require", "split")
+    _me_win = month_end - timedelta(days=MONTHEND_WIN_D)
+    _me_stat = {"spill": 0, "refused": 0.0, "split": 0, "split_q": 0.0}
+
+    def _me_emit(p, gt, mset, pr, st, en, qty, rate):
+        """One campaign row -- or TWO, cut at `month_end`, under
+        PLANNER_L5_MONTHEND_FIT=split.
+
+        THE PRESS COMMITMENT [st, en] IS IDENTICAL EITHER WAY. `free[pr]`,
+        `busy`, `last_gt`, `press_tyres` and `_takt_commit` are all booked by
+        the caller against the whole block, so nothing about WHERE the campaign
+        sits changes -- only the row boundary. That is what separates this from
+        PLANNER_L5_MAX_CAMPAIGN_H (-43,104 PCR BUILT), which moved the seats.
+        Both pieces are the same GT on the same press and are contiguous, so no
+        mould change is charged between them.
+        """
+        def _row(s_, e_, q_):
+            return {"plant": p, "gt_code": gt, "mould_set": mset, "press": pr,
+                    "start_ts": s_, "end_ts": e_, "qty": float(q_),
+                    "hours": round((e_ - s_).total_seconds() / 3600, 2)}
+        if (not _me_on or MONTHEND_FIT != "split" or en <= month_end
+                or st >= month_end or st < _me_win):
+            return [_row(st, en, qty)]
+        _q1 = int(holiday.work_seconds(p, st, month_end) / 3600.0 * rate)
+        _fl = min_lot.get(p, 0.0)
+        # B12 IS A CAP, NOT A KNOB -- never create a sub-floor piece.
+        if _q1 < _fl or (float(qty) - _q1) < _fl:
+            return [_row(st, en, qty)]
+        _me_stat["split"] += 1
+        _me_stat["split_q"] += float(qty) - _q1
+        return [_row(st, month_end, _q1),
+                _row(month_end, en, float(qty) - _q1)]
 
     for j in jobs:
         p, gt = j["plant"], j["gt_code"]
@@ -2189,6 +3106,20 @@ def main() -> None:
                     st = _g
                 elif _g is None:
                     _takt_nowin[0] += 1
+            # ---- FEED CEILING: move the seat off a rim/window whose eligible
+            # BUILDING machines cannot feed it. Same fence as takt, for the same
+            # reason: consulted ONLY when the ungoverned placement already fits
+            # inside the month, and it may only move the campaign to another
+            # window that also fits, so it can never turn deliverable volume
+            # into an overrun (DO-NOT #23).
+            if FEED_CEIL and st + dur <= month_end:
+                _f = _feed_free(p, gt, st, dur, rate)
+                if _f is not None and _f + dur <= month_end:
+                    if _f > st:
+                        _feed_moved[0] += 1
+                    st = _f
+                elif _f is None:
+                    _feed_nowin[0] += 1
             # ---- DAY CAP: move the seat off a day already at its ceiling ----
             # Same fence as takt, for the same reason: consulted only when the
             # ungoverned placement already fits inside the month, and it may
@@ -2230,6 +3161,20 @@ def main() -> None:
             # `dur` is press-HOURS (qty/rate) and stays exactly what it was; only
             # the wall-clock end moves. Identity with no calendar configured.
             en = holiday.add_work(p, st, dur.total_seconds() + _wear_s)
+            # MONTH-END COMPLETABILITY: 0 = finishes inside the reported
+            # month, 1 = spills past it. Ranked ABOVE `st` in the key below.
+            #
+            # MEASURED NO-OP -- see the PLANNER_L5_MONTHEND_FIT block at the top
+            # of this file for the full table. `en == st + dur` with `dur`
+            # identical on every candidate press, so `_fits` is a MONOTONE
+            # function of `st` and ranking it above `st` re-orders nothing:
+            # ME_pref7 is byte-identical to ME_base on all 11 artefacts at
+            # N = 5, 7 and 10. Kept, gated off, because deleting a rejected
+            # experiment destroys the evidence and invites a blind re-run.
+            #
+            # `_me_on` false => this is the constant 0 => the key is
+            # character-for-character the shipped one. Verified byte-identical.
+            _fits = 1 if (_me_on and st >= _me_win and en > month_end) else 0
             # R3: at most `cap` presses may run this GT concurrently
             overlap = sum(1 for (s2, e2) in busy.get((p, gt), [])
                           if s2 < en and st < e2)
@@ -2269,6 +3214,17 @@ def main() -> None:
             # the plant's 3 was batching preference, not a requirement.
             # MAXPG is then head-room ON TOP of the physical minimum, so the rule
             # scales with demand and never encodes one month's habit.
+            # FEED CAP: a GT released early at tau_min may only occupy as many
+            # presses as its OWN building machines can actually feed. Applies to
+            # seats that start inside the first tau*+band window -- after that the
+            # normal wall would have held anyway, so the cap must not bind there
+            # or it would throttle the whole month instead of the ramp.
+            if _early_cap and st < t0 + timedelta(hours=tau_h[p] + bband[p]):
+                _fc = _early_cap.get((p, gt))
+                if _fc is not None:
+                    _fs = _gt_presses.setdefault((p, gt), set())
+                    if pr not in _fs and len(_fs) >= _fc:
+                        continue
             if MAXPG > 0.0:
                 _seen = _gt_presses.setdefault((p, gt), set())
                 _lim = _pcap.get((p, gt))
@@ -2330,14 +3286,16 @@ def main() -> None:
             _pool = best_ung if _over_cap else best
             if SCARCE_PRESS and SCARCE_SLACK_H > 0.0:
                 _bk = int(st.timestamp() // (SCARCE_SLACK_H * 3600.0))
-                _key = (_bk, _scar, same_rim, st, pr)
-                _bst = (_pool[5], _pool[4], _pool[3], _pool[0], _pool[1])                     if _pool is not None else None
+                _key = (_fits, _bk, _scar, same_rim, st, pr)
+                _bst = (_pool[6], _pool[5], _pool[4], _pool[3], _pool[0],
+                        _pool[1]) if _pool is not None else None
             else:
-                _key = (st, same_rim, _scar, pr)
-                _bst = (_pool[0], _pool[3], _pool[4], _pool[1])                     if _pool is not None else None
+                _key = (_fits, st, same_rim, _scar, pr)
+                _bst = (_pool[6], _pool[0], _pool[3], _pool[4], _pool[1])                     if _pool is not None else None
             if _pool is None or _key < _bst:
                 _pool = (st, pr, en, same_rim, _scar,
-                         int(st.timestamp() // (max(SCARCE_SLACK_H, 1e-9) * 3600.0)))
+                         int(st.timestamp() // (max(SCARCE_SLACK_H, 1e-9) * 3600.0)),
+                         _fits)
                 if _over_cap:
                     best_ung = _pool
                 else:
@@ -2378,8 +3336,27 @@ def main() -> None:
                                       mchg_s(p, pr))
             st = holiday.next_free(p, st)
             best = (st, pr, holiday.add_work(p, st, dur.total_seconds()),
-                    1, 0, 0)
+                    1, 0, 0, 0)
         st, pr, en = best[0], best[1], best[2]
+        # ---- MONTH-END COMPLETABILITY: resolve the winner ------------------
+        # `_fits` leads the candidate key, so if ANY eligible press could seat
+        # this campaign inside the month the winner is one of them. Reaching
+        # here with a spill therefore means NO press could -- which is what
+        # `require` and `split` act on.
+        if _me_on and st >= _me_win and en > month_end:
+            _me_stat["spill"] += 1
+            if MONTHEND_FIT == "require" and MONTHEND_STRICT:
+                # The literal "require" reading. It can only LOSE tyres -- a
+                # campaign no press can finish in-month is simply not placed --
+                # and it is measured for exactly that reason. Same doctrine as
+                # DAY_CAP_STRICT: a shape preference that becomes lost demand
+                # must be PRICED, never hidden behind a soft fallback.
+                _me_stat["refused"] += float(j["qty"])
+                unplaced.append({**j, "reason": "cannot finish in month"})
+                continue
+            # `split` is applied at the EMISSION sites (`_me_emit`), not here:
+            # a campaign can also reach `placed` through the horizon-truncation
+            # branch below, and 13 of the first 17 splits did exactly that.
         if en > horizon:
             # SPLIT TO FIT -- never discard a lot whole.
             # L5 previously placed a lot all-or-nothing, so a single-lot GT whose
@@ -2442,10 +3419,8 @@ def main() -> None:
                 press_tyres[pr] = press_tyres.get(pr, 0.0) + float(j["qty"])
                 busy.setdefault((p, gt), []).append((st, en))
                 _takt_commit(p, gt, st, en)
-                placed.append({"plant": p, "gt_code": gt,
-                               "mould_set": j["mould_set"], "press": pr,
-                               "start_ts": st, "end_ts": en, "qty": float(can),
-                               "hours": round((en - st).total_seconds() / 3600, 2)})
+                placed.extend(_me_emit(p, gt, j["mould_set"], pr, st, en,
+                                       float(can), rate))
                 left = j["qty"] - can
                 if left >= floor_q:
                     unplaced.append({**j, "qty": left,
@@ -2475,10 +3450,14 @@ def main() -> None:
             early_budget[(p, gt)] = max(
                 0.0, early_budget.get((p, gt), 0.0)
                 - _gapq_of.get((p, gt), gap_tyres[p]))
-        placed.append({"plant": p, "gt_code": gt, "mould_set": j["mould_set"],
-                       "press": pr, "start_ts": st, "end_ts": en,
-                       "qty": j["qty"],
-                       "hours": round((en - st).total_seconds() / 3600, 2)})
+        placed.extend(_me_emit(p, gt, j["mould_set"], pr, st, en,
+                               j["qty"], rate))
+
+    if _me_on:
+        print(f"  [month-end fit] mode={MONTHEND_FIT} win={MONTHEND_WIN_D:.0f}d"
+              f"  spill={_me_stat['spill']}  split={_me_stat['split']}"
+              f" (carried {_me_stat['split_q']:,.0f})"
+              f"  refused={_me_stat['refused']:,.0f}")
 
     # ---- BACKFILL PASS ---------------------------------------------------
     # The main pass drops a campaign whole if it does not fit. But the capacity
@@ -2579,6 +3558,15 @@ def main() -> None:
     unplaced = still
     print(f"  backfill: recovered {recovered:,.0f} tyres by splitting into "
           f"available gaps ({len(still)} campaigns still short)\n")
+
+    # ---- FEED CEILING: what the governor actually did ---------------------
+    # `moved` is the count of seats the ceiling pushed later; `no window` is the
+    # count it could not place inside the month and so let through UNGOVERNED.
+    # A high `no window` means the ceiling is refusing what the month cannot
+    # re-seat anywhere -- i.e. it is destroying volume, not levelling it.
+    if FEED_CEIL:
+        print(f"  FEED CEILING  seats moved later {_feed_moved[0]:,}"
+              f"   no in-month window (placed ungoverned) {_feed_nowin[0]:,}")
 
     # ---- DAY CAP: what the governor actually did --------------------------
     # Printed, not persisted, like the takt line and the rim-spill report --

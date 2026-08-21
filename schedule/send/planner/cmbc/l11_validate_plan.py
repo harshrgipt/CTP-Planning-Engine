@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from planner.cmbc import holiday
+from planner.cmbc import holiday, r3_cap
 from planner.config import CONFIG, GT_SHELF_LIFE_H, PRESS_ROSTER
 from planner.data.warehouse import duck
 from planner import paths
@@ -226,6 +226,11 @@ def main() -> None:
     # month already fixed in the partition builder (PARTITION §3) -- third
     # instance, so grep before assuming it is gone.
     _nh = calendar.monthrange(int(a.month[:4]), int(a.month[5:7]))[1] * 24
+    # THE PLANT DAY STARTS AT 07:00 (rule S1) and every exported sheet buckets
+    # on it. Derived once here so no invariant below re-derives it -- and so
+    # nothing reaches for `.dt.date()`, which is the wall-clock day and a
+    # different partition of the month. See the machine-day block below.
+    t0 = datetime(int(a.month[:4]), int(a.month[5:7]), 1, 7, 0)
 
     for p in ["PCR", "TBR"]:
         tau = float(P["tau"][p]["tau_star_h"])
@@ -239,10 +244,66 @@ def main() -> None:
         check(f"{p} median GT wait vs tau*", f"{med:.2f} h",
               f"{tau:.2f} +/-20%", abs(med - tau) / tau <= 0.20,
               "the pull equation binding")
-        check(f"{p} GT wait p95", f"{np.percentile(w,95):.1f} h", "<= 28 h",
-              np.percentile(w, 95) <= 28.0, "L0 observed p95")
-        check(f"{p} GT wait max (R5)", f"{w.max():.1f} h",
-              f"<= {GT_SHELF_LIFE_H:.0f} h", w.max() <= GT_SHELF_LIFE_H, "hard")
+        # DEFECT 4ag -- p95 is a RELEASE statistic and must exclude the
+        # OPENING_STOCK pseudo-rows for exactly the reason the R17 comment 20
+        # lines below already spells out: those rows carry
+        # start_ts == end_ts == t0, so their wait_h is measured from the
+        # horizon start, not from when the tyre was actually built (last
+        # month). 35 PCR / 32 TBR of them, 3,951 / 855 tyres. Including them
+        # FLIPPED this gate: TBR read 28.20 h FAIL against a 28 h cap where
+        # the released population is 27.90 h PASS. The independent verifier
+        # (`verify_export.py`, re-derived from sheet 1, which has no
+        # OPENING_STOCK rows) has been printing 27.8 h against L11's 28.2 h
+        # for the whole project -- the pack contradicted itself.
+        _rel = np.array(bs.filter((pl.col("plant") == p)
+                                  & (pl.col("machine") != "OPENING_STOCK"))["wait_h"], float)
+        if not len(_rel):
+            _rel = w
+        check(f"{p} GT wait p95", f"{np.percentile(_rel,95):.1f} h", "<= 28 h",
+              np.percentile(_rel, 95) <= 28.0, "L0 observed p95, RELEASED rows only")
+        # ---- R5 IS GRADED ON THE FIRST TYRE OF THE SLICE, NOT THE LAST -----
+        #      A measured defect, found 2026-08-21.
+        #   `wait_h` is `cure_ts - end_ts`: the wait of the LAST tyre off the
+        #   drum. A slice is built continuously from `start_ts` to `end_ts`, so
+        #   the FIRST tyre waits `wait_h + slice hours` -- and it is the first
+        #   tyre that expires. The comment 250 lines below in l7's `_place`
+        #   records the same error one level up ("checking t_last - run_end
+        #   looked at the wrong endpoint"); it was fixed from the RUN to the
+        #   SLICE and the slice's own span was left in.
+        #
+        #     grade at   Jul PCR   Jul TBR   Aug PCR   Aug TBR
+        #     slice end    71.23     69.6     *63.27    *71.71
+        #     first tyre   74.59     70.4     *65.58    *73.45
+        #   * re-measured this session on a fresh August arm; the July column
+        #     is QUOTED from the forensics report and was NOT re-run (no July
+        #     arm exists -- the partition on disk is stamped 2026-08).
+        #
+        #   118 PCR (Jul) and 26 TBR (Aug) tyres are past the 72 h shelf life
+        #   and the old form of this gate could not see any of them. 0.03 % of
+        #   volume -- small, and a passing check that is not a correct check.
+        #   NOT behind a flag: this is what the rule says. The PLAN is only made
+        #   to honour it under PLANNER_L7_R5_FIRST_TYRE (l7, default off,
+        #   measured) -- so expect this line to FAIL until that ships.
+        _w1 = np.array(((bs.filter(pl.col("plant") == p)["cure_ts"]
+                         - bs.filter(pl.col("plant") == p)["start_ts"])
+                        .dt.total_seconds() / 3600.0), float)
+        check(f"{p} GT wait max (R5, first tyre)", f"{_w1.max():.1f} h",
+              f"<= {GT_SHELF_LIFE_H:.0f} h", _w1.max() <= GT_SHELF_LIFE_H,
+              f"cure_ts - start_ts; graded at slice END this reads "
+              f"{w.max():.1f} h")
+        # THE COUNT, BECAUSE A MAX CANNOT BE ACTED ON. Tyres inside a slice are
+        # built at a constant cadence, so the share of a slice that is already
+        # past the shelf life at its cure is (wait_first - 72) / slice_span,
+        # clipped to [0, 1]. This is the number that says whether a breach is a
+        # rounding artefact or scrap.
+        _bp5 = bs.filter(pl.col("plant") == p)
+        _we5 = np.array(((_bp5["cure_ts"] - _bp5["end_ts"])
+                         .dt.total_seconds() / 3600.0), float)
+        _span5 = np.maximum(_w1 - _we5, 1e-12)
+        _over5 = float((np.clip((_w1 - GT_SHELF_LIFE_H) / _span5, 0.0, 1.0)
+                        * np.array(_bp5["qty"], float)).sum())
+        check(f"{p} tyres past R5 shelf life", f"{_over5:,.0f}", "0",
+              _over5 < 0.5, "per-tyre, pro-rated inside the slice")
         # R17 IS A RELEASE RULE -- it does not apply to opening stock.
         # Those rows carry start_ts == end_ts == t0, so wait_h is measured from
         # the horizon start, not from when the tyre was built (last month). With
@@ -329,7 +390,34 @@ def main() -> None:
                   f"<= {lim:.0f}%", sh <= lim,
                   "B12 / R9 -- gated at the plant's own sub-floor share")
             bp = bsm.filter(pl.col("plant") == p)
-            mdays = (bp.with_columns(pl.col("start_ts").dt.date().alias("d"))
+            # ---- THE MACHINE-DAY DENOMINATOR IS THE PLANT DAY, NOT THE
+            #      WALL-CLOCK DATE -- a measured defect, found 2026-08-21.
+            #   This was `pl.col("start_ts").dt.date()`. The plant day runs
+            #   07:00 -> 07:00 and every exported sheet buckets on it
+            #   (`plant_day` in export_shift_schedule.py, whose own docstring
+            #   records that wall-clock labelling once mislabelled 28.7 % of
+            #   build rows). A calendar date splits the C shift in two, so a
+            #   machine running through 07:00 was counted as TWO machine-days
+            #   and every `per machine-day` rate below it read LOW.
+            #
+            #     machine-days     PCR Jul  TBR Jul  PCR Aug  TBR Aug
+            #     calendar (old)      351      281     *355     *283
+            #     plant-day (now)     345      278     *343     *272
+            #   * re-measured this session on a fresh August arm. The July
+            #     column is QUOTED from the forensics report and was NOT
+            #     re-run -- no July arm exists, the partition on disk is
+            #     stamped 2026-08 and must not be rebuilt.
+            #
+            #   Understated by 1.7-4.0 %. IT FLIPS A GATE: August PCR WEIGHTED
+            #   build changeover reads 73.6 PASS on 355 calendar days and
+            #   76.2 FAIL on 343 plant-days, against the 74.0 plant benchmark.
+            #   The shipped pack's "32 PASS of 50" for August is really 31.
+            #   NOT behind a flag -- a denominator is either the one the rest of
+            #   the pack uses or it is wrong, and there is no arm in which the
+            #   old one is the right answer.
+            _dnum = ((pl.col("start_ts") - pl.lit(t0)).dt.total_seconds()
+                     // 86400).alias("d")
+            mdays = (bp.with_columns(_dnum)
                      .select(["machine", "d"]).unique().height)
             cpd = (rp.height - bp["machine"].n_unique()) / max(mdays, 1)
             cap_co = CONFIG.thresholds.plant_co_per_machine_day.get(p, 99.0)
@@ -468,9 +556,73 @@ def main() -> None:
                       "G8 'every day incl. the last'; DETECTOR -- cause is the "
                       "demand horizon, never fix by forcing closing stock")
 
+        # --- DAILY CURE vs THE PRESS FLEET --------------------------------
+        # NOTHING GRADED THIS, AND THE PACK SHIPPED AN IMPOSSIBLE DAY.
+        # Measured 2026-08-21 on the shipped August pack: `7_daily_summary.cured`
+        # read 16,696 on plant-day 3, which needs 2,389 press-hours against a
+        # fleet of 86 x 24 = 2,064 -- 115.7 % of every press in the plant. Four
+        # days were over 100 % (16,696 / 15,482 / 15,001 / 14,749).
+        #
+        # The PLAN was feasible -- the campaign-prorated curve peaks at 14,286 =
+        # 99.1 % and never breaches. What was wrong is that `cured` buckets
+        # tyres on `cure_ts` with no capacity constraint, and no invariant
+        # existed to notice. A supervisor reads that column as a daily target.
+        #
+        # Graded on the SAME basis the pack publishes (`cure_ts` bucketing on
+        # the plant-day) so the gate sees what the reader sees. The denominator
+        # is derived from this run's own campaigns -- tyres per press-hour x
+        # roster x 24 h -- never a mined constant. It is a physical ceiling, so
+        # 100 % is the target, not a tuned threshold.
+        try:
+            _ccf = pl.read_parquet(run / "cure_campaigns.parquet").filter(
+                pl.col("plant") == p)
+            _pph = float((_ccf["end_ts"] - _ccf["start_ts"])
+                         .dt.total_seconds().sum()) / 3600.0 if _ccf.height else 0.0
+            _rate = (float(_ccf["qty"].sum()) / _pph) if _pph > 0 else 0.0
+            _capd = _rate * PRESS_ROSTER.get(p, 0) * 24.0
+            _mend = t0 + timedelta(hours=_nh)      # plant month end, 07:00
+            # GRADE THE PHYSICAL CURVE, NOT THE STAMP. `cure_ts` stamps a whole
+            # slice at one instant, so bucketing on it invents peaks that no
+            # press schedule contains -- Aug PCR day 3 stamped 16,696 while the
+            # presses ran 1,944 h = 13,589. Spread each campaign over the hours
+            # its press is actually occupied inside the plant-day; that is what
+            # the plant experiences and what sheet 7's `cured` now publishes.
+            _nd = int(_nh // 24)
+            _dq = [0.0] * (_nd + 1)
+            for _r in _ccf.iter_rows(named=True):
+                _sp, _ep = _r["start_ts"], _r["end_ts"]
+                _sec = (_ep - _sp).total_seconds()
+                if _sec <= 0:
+                    continue
+                _q = float(_r["qty"])
+                _d0 = int((_sp - t0).total_seconds() // 86400)
+                _d1 = int((_ep - t0 - timedelta(microseconds=1)).total_seconds() // 86400)
+                for _d in range(max(_d0, 0), min(_d1, _nd - 1) + 1):
+                    _a = max(_sp, t0 + timedelta(days=_d))
+                    _b = min(_ep, t0 + timedelta(days=_d + 1))
+                    if _b > _a:
+                        _dq[_d] += _q * (_b - _a).total_seconds() / _sec
+            if _capd > 0 and any(_dq):
+                _mx = max(_dq)
+                _nov = sum(1 for _v in _dq if _v > _capd)
+                check(f"{p} peak daily cure vs press fleet",
+                      f"{_mx:,.0f} = {100*_mx/_capd:.1f}% of {_capd:,.0f}",
+                      "<= 100%", _mx <= _capd,
+                      f"{_nov} day(s) over the whole fleet -- PHYSICAL, "
+                      "sheet 7 'cured' is what the plant reads")
+        except Exception as _exc:                                # noqa: BLE001
+            # NEVER SILENT. A capacity gate that cannot run must say so --
+            # a swallowed exception here reads exactly like a passing check.
+            print(f"  [l11] !! peak-daily-cure check could not run for {p}: {_exc}")
+
         # --- moulds ------------------------------------------------------
-        cap = {r["gt_code"]: max(int(r["moulds"]), 1) for r in
-               mo.filter(pl.col("plant") == p).iter_rows(named=True)}
+        # SAME DERIVATION L5 PLANNED TO. `cap_mould.moulds` counts mould HALVES
+        # and the plant ruling is 2 per press; the divisor lives in r3_cap and
+        # nowhere else. Grading against the raw `moulds` while l5 seats against
+        # `moulds / 2` is the duplicated-constant defect PARTITION §1g records --
+        # the invariant would pass by construction for any divisor.
+        cap = {k[1]: v for k, v in r3_cap.table(
+            mo.filter(pl.col("plant") == p).iter_rows(named=True)).items()}
         bad = 0
         for (gt,), g in ch.group_by("gt_code"):
             iv = list(zip(g["start_ts"].to_list(), g["end_ts"].to_list()))
@@ -611,6 +763,8 @@ def main() -> None:
                 return_dtype=pl.Boolean))
             print(f"  lookahead: {len(_la_gts)} next-month GTs excluded from the "
                   f"fulfilment NUMERATOR as well as the denominator")
+        _tot_n = 0.0
+        _tot_g = 0.0
         for _p in ["PCR", "TBR"]:
             _sp = _sc.filter(pl.col("plant") == _p)
             # Subtract the lookahead QUANTITY, do not drop whole GTs -- a GT
@@ -636,6 +790,8 @@ def main() -> None:
                 _n -= float(_sp["gross_build_la"].sum())
             _rp = rec.filter(pl.col("plant") == _p)
             _g = float(_rp[_fedcol].sum())
+            _tot_n += _n
+            _tot_g += _g
             if _n > 0:
                 check(f"{_p} demand fulfilment", f"{100*_g/_n:.1f}%", ">= 99%",
                       _g / _n >= 0.99,
@@ -645,11 +801,24 @@ def main() -> None:
                     check(f"{_p} carry-out tail (excluded from fulfilment)",
                           f"{_tail:,.0f}", "reported", True,
                           "cured after month end -- next month's output")
-        need = float(_sc["gross_build"].sum())
-        got = float(rec[_fedcol].sum())
-        check("demand fulfilment", f"{100*got/need:.1f}%", ">= 99%",
-              got / need >= 0.99, "plant TOTAL, IN-MONTH -- never judge a change "
-              "on this alone, see DO-NOT #14")
+        # DEFECT 4af -- the plant TOTAL was the ONE line the 2026-08-14
+        # denominator fix above did not reach. It divided an
+        # opening-stock-INCLUSIVE numerator (`qty_fed_in_month`) by an
+        # opening-stock-EXCLUSIVE denominator (`gross_build` = requirement
+        # MINUS opening stock) and skipped the look-ahead subtraction, so the
+        # total came out ABOVE BOTH of its own components -- Jul BASE printed
+        # PCR 94.8 / TBR 96.1 / TOTAL 96.2. A weighted mean cannot exceed both
+        # parts; that impossibility is the proof, no arithmetic needed.
+        # Orphaned opening-stock term: 6,071 tyres, +1.17 pp overstated.
+        # Now it is literally the sum of the per-plant pairs, so it is bounded
+        # by them by construction and can never drift from them again.
+        need = _tot_n
+        got = _tot_g
+        if need > 0:
+            check("demand fulfilment", f"{100*got/need:.1f}%", ">= 99%",
+                  got / need >= 0.99, "plant TOTAL = sum of the per-plant "
+                  "numerators/denominators -- never judge a change on this "
+                  "alone, see DO-NOT #14")
     resid = req.filter(pl.col("residual"))
     check("residual demand flagged not dropped",
           f"{resid.height} GTs / {int(resid['demand'].sum()):,} tyres",
@@ -757,6 +926,63 @@ def main() -> None:
                   "a carried campaign is only representable in the next month's "
                   "carry-in if it fits the horizon tail; past that the rolling "
                   "contract breaks silently. Rising month-on-month = debt spiral")
+    # ---- OPENING STOCK THAT EXPIRED UNUSED ---------------------------------
+    #
+    # WHAT THIS GRADES / WHY IT EXISTS -- a measured defect, found 2026-08-21
+    #   The month opens with green tyres on the floor. They are already built,
+    #   they are inside R5 on arrival (August age p50 6-15 h, max 55.9 h, ZERO
+    #   rows over 72 h) and every one the plan does not cure is a tyre building
+    #   has to make again. August: PCR held 5,132, drew 3,453, EXPIRED 1,679;
+    #   TBR held 1,266, drew 794, EXPIRED 472. July: 869 / 442. Nothing in the
+    #   engine graded it and the one L7 line that named it could not fire (it
+    #   compared the residual against the draw -- see the fixed guard in
+    #   l7_pull_release). Four always-passing guards and a silent 3,462-tyre loss
+    #   have the same root cause: nobody grades what nobody prints.
+    #
+    # THE POPULATION IS THE ADDRESSABLE ONE, and that choice is the whole
+    # invariant. Stock sitting on a GT with NO cure campaign this month is a
+    # DEMAND fact -- there is nothing to cure it into and no placement change can
+    # reach it (August 656 of 1,679 PCR, 240 of 472 TBR, i.e. ~40 % of the
+    # headline). Grading the total would make this a gate on the order book that
+    # the planner can never pass, which is EXPERT_AUDIT's fourth failure mode
+    # (an always-failing guard) and just as useless as an always-passing one.
+    #
+    # WHY 0 IS REACHABLE AND NOT ASPIRATIONAL. Every GT in this population has a
+    # cure campaign in the plan; the only thing wrong with it is WHEN. A plan
+    # that seats each such GT's first campaign inside its own stock's remaining
+    # shelf life scores 0 here, and the campaign is placed by L5's greedy, which
+    # is free to order its queue any way it likes. The count is `qty`, not a
+    # share, so it is comparable across arms and months and cannot be flattered
+    # by a denominator (DO-NOT #32).
+    _ogf = paths.opening_gt(a.month)
+    if _ogf.exists():
+        _og = pl.read_parquet(_ogf).filter(pl.col("age_h") <= GT_SHELF_LIFE_H)
+        _stk = (_og.group_by(["plant", "gt_code"])
+                .agg(pl.len().alias("held")))
+        _drawn = (bs.filter(pl.col("machine") == "OPENING_STOCK")
+                  .group_by(["plant", "gt_code"]).agg(pl.col("qty").sum().alias("drawn")))
+        _planned = camp.select(["plant", "gt_code"]).unique().with_columns(
+            pl.lit(True).alias("has_campaign"))
+        _x = (_stk.join(_drawn, on=["plant", "gt_code"], how="left")
+              .with_columns(pl.col("drawn").fill_null(0.0))
+              .with_columns((pl.col("held") - pl.col("drawn")).alias("expired"))
+              .join(_planned, on=["plant", "gt_code"], how="left")
+              .with_columns(pl.col("has_campaign").fill_null(False)))
+        for _p in ["PCR", "TBR"]:
+            _xp = _x.filter(pl.col("plant") == _p)
+            if not _xp.height:
+                continue
+            _held = float(_xp["held"].sum())
+            _exp = float(_xp["expired"].sum())
+            _addr = float(_xp.filter(pl.col("has_campaign"))["expired"].sum())
+            _ngt = _xp.filter(pl.col("has_campaign") & (pl.col("expired") > 0.5)).height
+            check(f"{_p} opening stock expired on a planned GT",
+                  f"{_addr:,.0f} of {_held:,.0f} held  ({_ngt} GTs)",
+                  "0 tyres", _addr < 0.5,
+                  "already-built green inside R5 at t0 whose GT the plan DOES "
+                  "cure, but not before the stock expires. Building has to make "
+                  f"these again. Total expired incl. undemanded GTs: {_exp:,.0f}")
+
     _cif = Path(os.environ.get("PLANNER_CARRY_IN", "")) if os.environ.get(
         "PLANNER_CARRY_IN") else (ROOT / "masters" / "carry_in"
                                   / f"carry_in_{a.month}.parquet")

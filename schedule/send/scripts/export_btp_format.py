@@ -101,12 +101,54 @@ The physical plan is not spiky. On the press-output basis it is 50.9 tyres per
 PCR press-shift and 14.3 on TBR, against a plant actual of 53-54 and 16. So this
 sheet uses the press-output basis, integerised with the same largest-remainder
 apportionment. A zero here means the press genuinely has no campaign seated.
+
+===============================================================================
+PROBLEM 3 -- THIS WORKBOOK PUBLISHED PRESS CAPACITY AS CURED OUTPUT.
+===============================================================================
+FOUND AND FIXED 2026-08-21. Measured on runs/SHIP2_jul and runs/SHIP2_aug.
+
+Every quantity on the curing side came from `cure_by_shift.parquet`, which is
+the campaign NAMEPLATE discretised to shifts -- press capacity seated, not
+tyres. The csv pack says so in its own KPI sheet ("F is PRESS CAPACITY SEATED,
+not tyres. Never quote it as output.") and this workbook quoted it as output:
+
+  August PCR   `Daily Cured tyres` TOTAL / `Planned_Units`      408,929
+               csv sheet 2 `qty` = sheet 6 = sheet 7 `cured`    401,551
+               the numerator behind the graded headline (L11)   396,636
+
+  `Fulfillment_Pct` TOTAL then divided that nameplate by the raw order book:
+
+    plant-month   this workbook   the SAME pack's 9b_l11_invariants
+    PCR Jul            98.37 %                     96.1 %  FAIL
+    TBR Jul            99.30 %                     96.1 %  FAIL
+    PCR Aug            95.29 %                     92.7 %  FAIL
+    TBR Aug            99.47 %                     96.1 %  FAIL
+
+  TBR shipped as PASS here and FAIL there, from one run, in one pack.
+
+  `GT Gap Diagnostic` `Closing_Balance` was `GT_Built - GT_Cured` with the
+  correct clipped build and the nameplate cure and NO opening-stock column, so
+  it said PCR ends July 5,640 green tyres NEGATIVE where the plan hands 4,357
+  forward -- 9,997 tyres, opposite sign, on the hand-off to next month.
+
+  `Daily GT & Carcass` `GT_Produced` summed `gt_events` positive deltas, which
+  INCLUDE the OPENING_STOCK credit: 389,030 against this workbook's own
+  `Shift Schedule` Qty of 386,264.
+
+FIX. Fulfilment and every cure quantity now come from
+`scripts/export_shift_schedule.plan_quantities()` and
+`press_shift_cure()` -- the same two functions the csv pack uses, imported, not
+copied. Where two quantities are genuinely different things all of them are
+kept as named columns (`Qty` press-run, `Qty_Delivered`, `Nameplate_Seated`),
+because deleting the nameplate would destroy the press-starvation signal.
+`9c_quantity_bridge` in the csv pack is the ladder between them.
 """
 from __future__ import annotations
 
 import argparse
 import calendar
 import os
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -117,6 +159,15 @@ from openpyxl.utils import get_column_letter
 from planner import paths
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# THE CANONICAL BASIS IS IMPORTED, NEVER RE-IMPLEMENTED. One implementation
+# that can be wrong beats two that can disagree -- which is exactly how this
+# workbook came to publish a different fulfilment number from the csv pack
+# built out of the same run directory. See PROBLEM 3 above.
+from scripts.export_shift_schedule import (            # noqa: E402
+    plan_quantities, press_shift_cure, plant_closures, quantity_bridge)
+
 D = ROOT / "warehouse" / "derived"
 PLANTS = ("PCR", "TBR")
 SHIFTS = ("A", "B", "C")
@@ -136,6 +187,17 @@ def _split_int(total: int, weights: list[float]) -> list[int]:
         return []
     total = int(round(total))
     w = sum(weights)
+    # ALREADY WHOLE TYRES SUMMING TO THE TARGET -> RETURN THEM UNTOUCHED.
+    # `press_shift_cure` now hands over integer quantities that already sum
+    # exactly, and re-apportioning them was not a no-op: `total * x / w` is a
+    # float division, so a weight of 50 can come back as 49.999999996, truncate
+    # to 49, and be handed its missing tyre to a DIFFERENT row by the remainder
+    # loop. That moved up to 5 tyres per plant-day between the BTP workbook and
+    # the csv pack -- two files disagreeing about one day, from pure float
+    # noise. Measured 2026-08-21: worst day gap 14.9 -> 5.0 -> 0.
+    if abs(w - total) < 1e-9 and all(
+            abs(float(x) - round(float(x))) < 1e-9 for x in weights):
+        return [int(round(float(x))) for x in weights]
     if w <= 0:
         out = [0] * n
         out[0] = total
@@ -156,6 +218,30 @@ def _split_int(total: int, weights: list[float]) -> list[int]:
         out[i] -= 1
         rem += 1
     return out
+
+
+def _intify(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
+    """Integerise each named column per (plant, gt_code), largest-remainder.
+
+    A tyre is an integer. Rounding 14,771 float rows independently once lost
+    489 tyres on TBR and gained 43 on PCR (see `_assign_sku`), so every
+    quantity this workbook prints is integerised ONCE per (plant, GT) against
+    that GT's own rounded total -- the same rule for all three cure bases, so
+    the three columns stay comparable row by row.
+    """
+    if df.height == 0:
+        return df
+    df = df.with_columns(pl.arange(0, pl.len()).alias("_ix"))
+    out = []
+    for _k, grp in df.group_by(["plant", "gt_code"], maintain_order=True):
+        g = grp
+        vals = {c: _split_int(int(round(float(g[c].sum()))),
+                              [max(float(x), 0.0) for x in g[c].to_list()])
+                for c in cols if c in g.columns}
+        rows = list(g.iter_rows(named=True))
+        for i, r in enumerate(rows):
+            out.append({**r, **{c: vals[c][i] for c in vals}})
+    return pl.DataFrame(out, infer_schema_length=None).sort("_ix").drop("_ix")
 
 
 def _gt_rounded_total(df: pl.DataFrame, qty_col: str = "qty") -> int:
@@ -269,7 +355,14 @@ def main() -> int:
     stamp = f"{y}-{mth:02d}-01"
 
     bs = pl.read_parquet(run / "build_by_shift.parquet")
-    cs = pl.read_parquet(run / "cure_by_shift.parquet")
+    # THE CANONICAL BASIS. `cs` used to be `cure_by_shift.parquet` -- the
+    # campaign NAMEPLATE discretised to shifts. It is still here, as the
+    # `qty_planned` column, but it is no longer what this workbook calls cured.
+    CLOSE = plant_closures(run, a.month)
+    QQ = plan_quantities(run, a.month)
+    cs, _l10res = press_shift_cure(run, a.month, CLOSE)
+    cs = cs.rename({"plant_day": "day"})
+    CLOSED_H = {p: 24.0 * len(CLOSE[p]) for p in PLANTS}
     ge = pl.read_parquet(run / "gt_events.parquet")
     mc = pl.read_parquet(run / "mould_changes.parquet")
     dem = pl.read_parquet(ROOT / "masters" / "demand" / f"demand_{a.month}.parquet")
@@ -455,6 +548,35 @@ def main() -> int:
             elig_p[r["gt_code"]] = elig_p.get(r["gt_code"], 0) + 1
         gt_of_sku = {s: gt for (pp, gt), lst in shares.items() if pp == plant
                      for s, _ in lst}
+        QP = QQ[plant]
+
+        def _sku_split(by_gt: dict, total: float) -> dict:
+            """A per-GT quantity spread to SKUs by cured share, integerised
+            ONCE per plant against `total`.
+
+            The integerisation is done at PLANT level, not per GT, so the
+            resulting column sums to `total` EXACTLY -- which is the whole
+            point here: `Fulfillment_Pct` on the TOTAL row must be the number
+            L11 grades, to the tyre, not that number plus a rounding residue
+            spread over 50 GTs. The cost is that a single GT's SKU rows can be
+            off its own value by at most one tyre.
+            """
+            keys, w = [], []
+            for gt, v in by_gt.items():
+                for sk, sh in (shares.get((plant, gt)) or [(gt, 1.0)]):
+                    keys.append(sk)
+                    w.append(max(float(v), 0.0) * float(sh))
+            ints = _split_int(int(round(total)), w)
+            out_: dict = {}
+            for k, i in zip(keys, ints):
+                out_[k] = out_.get(k, 0) + i
+            return out_
+
+        # THE GRADED FULFILMENT, PER SKU. Numerator and denominator are L11's
+        # own per-GT quantities (see plan_quantities), split to SKUs by the
+        # cured-share rule this file already uses for everything else.
+        sku_num = _sku_split(QP["num_by_gt"], QP["numerator"])
+        sku_den = _sku_split(QP["den_by_gt"], QP["denominator"])
 
         # ================= BUILDING =====================================
         # changeover: a run boundary on a machine. Sort by TIME, never by the
@@ -535,18 +657,44 @@ def main() -> int:
              .floor() + 1).cast(pl.Int64).alias("day"))
         eod = {int(r["day"]): float(r["bal"])
                for r in bal.group_by("day").agg(pl.col("bal").last()).iter_rows(named=True)}
+        # `GT_Produced` USED TO BE THE gt_events POSITIVE DELTAS, WHICH INCLUDE
+        # THE OPENING-STOCK CREDIT. On July PCR that summed to 389,030 against
+        # this same workbook's `Shift Schedule` Qty of 386,264 -- two columns,
+        # one file, 2,766 tyres apart, with nothing saying why. `GT_Produced` is
+        # now the tyres this month BUILDS, which is the Shift Schedule total to
+        # the tyre; the opening credit and the full ledger credit are their own
+        # columns beside it.
+        _bd = {int(r["day"]): r for r in
+               ssx.group_by("day").agg(
+                   pl.col("qty").sum().alias("q"),
+                   pl.col("gt_code").n_unique().alias("n")).iter_rows(named=True)}
+        # OPENING STOCK IS READ, NOT INFERRED. Deriving it as
+        # (gt_events credits - built) came out 2,766 against a true 3,951: the
+        # two frames bucket the month boundary differently, so the residual
+        # absorbed a boundary artefact and called it opening stock. It is taken
+        # straight from the OPENING_STOCK pseudo-machine rows of
+        # `build_schedule.parquet`, which is where `9a`'s opening figure and
+        # csv `7_daily_summary.opening_gt_credited` also come from.
+        _bsf = pl.read_parquet(run / "build_schedule.parquet").filter(
+            (pl.col("plant") == plant) & (pl.col("machine") == "OPENING_STOCK"))
+        _opd: dict = {}
+        for r in _bsf.iter_rows(named=True):
+            _d = int((r["end_ts"] - t0).total_seconds() // 86400) + 1
+            _opd[_d] = _opd.get(_d, 0.0) + float(r["qty"])
         daily, cum = [], 0.0
         last_bal = 0.0
         for dd in range(1, ndays + 1):
-            row = gd.filter(pl.col("day") == dd)
-            g = float(row["gt"][0]) if row.height else 0.0
-            ns = int(row["nsku"][0]) if row.height else 0
-            cum += g
+            bq_ = float(_bd.get(dd, {}).get("q", 0.0))
+            ns = int(_bd.get(dd, {}).get("n", 0))
+            op_ = _opd.get(dd, 0.0)
+            cum += bq_
             last_bal = eod.get(dd, last_bal)
             # Carcass (Stage-1) is not modelled by this engine -- it plans and
             # schedules Stage-2 only, so the column is 0 rather than invented.
-            daily.append([_day_date(dd), int(round(g)), 0, int(round(g)), ns,
-                          int(round(cum)), int(round(last_bal))])
+            daily.append([_day_date(dd), int(round(bq_)), 0, int(round(bq_)), ns,
+                          int(round(cum)), int(round(last_bal)),
+                          int(round(op_)), int(round(bq_ + op_)),
+                          dd in CLOSE[plant]])
 
         # Demand fulfilment, building side
         built = {}
@@ -561,9 +709,19 @@ def main() -> int:
             pu = built.get(k, 0.0)
             tot = pu + gi
             gapq = max(dq - tot, 0.0)
+            # `Fulfillment_Pct` HERE IS A BUILD-COVERAGE RATIO -- built plus
+            # opening stock over the raw order book -- and it is NOT the number
+            # the gate grades. It shipped under the same header as the curing
+            # workbook's, so two sheets in one pack disagreed by up to 6 pt on
+            # the same run. It keeps its meaning under an honest name, and the
+            # graded ratio ships beside it, identical to the curing workbook.
             bdf.append([k, gt, cat.get(k), round(prio.get(k, 0.0), 7), int(dq),
                         int(round(gi)), int(round(pu)), int(round(tot)),
                         int(round(gapq)), _pct(min(tot / dq, 1.0) if dq else 0),
+                        int(round(float(sku_den.get(k, 0.0)))),
+                        int(round(float(sku_num.get(k, 0.0)))),
+                        (float(sku_num.get(k, 0.0))
+                         / max(float(sku_den.get(k, 0.0)), 1e-9)),
                         "FULLY MET" if gapq <= 0 else "PARTIAL",
                         round(ct_sku.get((plant, k),
                                          ct_gt.get((plant, gt), 0.0)), 1),
@@ -571,11 +729,23 @@ def main() -> int:
         # Footer widths track the header. Adding GT_Code at index 1 without
         # padding these left the count sitting under GT_Code instead of under
         # Category -- a summary row silently reading against the wrong header.
-        bdf += [[None] * 15,
-                ["Total Building COs", None, len(co_rows)] + [None] * 12]
+        _NB = 18
+        bdf += [[None] * _NB,
+                ["Total Building COs", None, len(co_rows)] + [None] * (_NB - 3),
+                ["TOTAL", None, None, None, int(sum(dsku.values())), None,
+                 int(round(QP["built"])), None, None, None,
+                 int(round(QP["denominator"])), int(round(QP["numerator"])),
+                 QP["numerator"] / max(QP["denominator"], 1), None, None, None,
+                 None,
+                 "Planned_Units is BUILT this month. Fulfillment_Pct is the "
+                 "graded cure ratio and is identical in the curing workbook "
+                 "and in 9b_l11_invariants."]]
 
         # machine utilisation, building
-        avail = ndays * 1440.0
+        # AVAILABLE MINUTES EXCLUDE THE PLANT CLOSURE (rule G3): a shut day is
+        # not idle machine capacity, and counting it understated occupancy by
+        # 2.7 pt on August.
+        avail = ndays * 1440.0 - CLOSED_H[plant] * 60.0
         mu = []
         for mach in sorted(b["machine"].unique().to_list()):
             z = b.filter(pl.col("machine") == mach)
@@ -592,7 +762,9 @@ def main() -> int:
         mu_title = (f"Avg GT-machine util (prod only): {100*sum(_u)/len(_u):.1f}%"
                     f"  |  High(>=80%): {sum(1 for v in _u if v >= .8)}"
                     f"  |  Low(<40%): {sum(1 for v in _u if v < .4)}"
-                    f"  |  {plant} Stage-2 machines: {len(mu)}")
+                    f"  |  {plant} Stage-2 machines: {len(mu)}"
+                    f"  |  Available_Mins excludes {CLOSED_H[plant]:.0f} h of "
+                    f"plant closure (days {CLOSE[plant] or 'none'})")
 
         _write(out / f"optimizer_building_schedule_full_{stamp}_{plant}.xlsx", [
             ("Shift Schedule", f"BC Building Schedule (Rolling Pipeline) - {plant}",
@@ -605,12 +777,25 @@ def main() -> int:
               "CO_Cost_Mins", "CO_Day_Index", "Status"], co_rows),
             ("SKU Classification", None,
              ["Category", "SKU_Count", "Total_Demand", "Avg_Priority"], cls_rows),
-            ("Daily GT & Carcass", None,
+            ("Daily GT & Carcass",
+             f"GT_Produced is tyres BUILT and sums to the Shift Schedule Qty "
+             f"({QP['built']:,.0f}). Opening_GT_Credited is last month's stock "
+             f"entering the ledger ({QP['opening']:,.0f}), read from the "
+             f"OPENING_STOCK rows of build_schedule. GT_Ledger_Credits is their "
+             f"sum -- what `gt_events` records, and what GT_Produced used to "
+             f"show on its own.",
              ["Date", "GT_Produced", "Carcass_Produced", "Total_Units",
-              "Active_SKUs", "Cumulative_GT", "EndDay_GT_Inventory"], daily),
-            ("Demand Fulfillment (B2C)", None,
+              "Active_SKUs", "Cumulative_GT", "EndDay_GT_Inventory",
+              "Opening_GT_Credited", "GT_Ledger_Credits", "Plant_Closed"], daily),
+            ("Demand Fulfillment (B2C)",
+             f"Build_Coverage_Pct = (Planned_Units + GT_Inventory) / Demand -- "
+             f"a BUILD ratio against the raw order book. Fulfillment_Pct is the "
+             f"graded cure ratio, {QP['numerator']:,.0f} / "
+             f"{QP['denominator']:,.0f} = {QP['pct']:.1f}%, identical to the "
+             f"curing workbook and to 9b_l11_invariants.",
              ["SKUCode", "GT_Code", "Category", "Priority", "Demand",
               "GT_Inventory", "Planned_Units", "Planned+GT", "Gap",
+              "Build_Coverage_Pct", "Requirement", "Cured_In_Month",
               "Fulfillment_Pct", "Status", "CycleTime_min", "Eligible_Machines",
               "Presses_Needed", "Skip_Reason"], bdf),
             ("Machine Utilization", mu_title,
@@ -621,13 +806,24 @@ def main() -> int:
         ])
 
         # ================= CURING =======================================
-        cx = _assign_sku(c, shares, ["day", "shift", "press"])
-        _tgt = _gt_rounded_total(c)
-        gap = int(float(cx["qty"].sum()) - _tgt)
-        _res = int(_tgt - round(float(c["qty"].sum())))
+        # THREE QUANTITIES, ALL INTEGERISED, ALL KEPT, ALL NAMED. See PROBLEM 3
+        # in the module docstring: this workbook used to carry exactly one, the
+        # NAMEPLATE, under the name `Qty`.
+        #   qty_run      tyres fed in-month, spread over the press hours the
+        #                campaign actually holds -- the press-output basis, and
+        #                the SKU driver because a press-shift is one SKU.
+        #   qty          tyres DELIVERED to the press in that shift (`cure_ts`
+        #                basis). Spiky; this is csv sheet 2's `qty` exactly.
+        #   qty_planned  press capacity SEATED. Never output.
+        c = _intify(c, ["qty_run", "qty", "qty_planned"])
+        cx = _assign_sku(c, shares, ["day", "shift", "press"],
+                         qty_col="qty_run")
+        _tgt = _gt_rounded_total(c, "qty_run")
+        gap = int(float(cx["qty_run"].sum()) - _tgt)
+        _res = int(_tgt - round(float(c["qty_run"].sum())))
         print(f"  {plant}  SPLIT RECONCILIATION  curing shift : "
-              f"GT {float(c['qty'].sum()):,.0f} -> SKU "
-              f"{float(cx['qty'].sum()):,.0f}   diff {gap}"
+              f"GT {float(c['qty_run'].sum()):,.0f} -> SKU "
+              f"{float(cx['qty_run'].sum()):,.0f}   diff {gap}"
               f"   {'OK' if gap == 0 else '!! MISMATCH'}"
               + (f"   (+{_res} per-GT rounding residue, not volume)" if _res else ""))
 
@@ -677,45 +873,76 @@ def main() -> int:
             com = min(co_by.get(k, 0.0), 480.0)
             clm = min(cl_by.get(k, 0.0), com)
             co_shift_rows += (com > 0)
-            q = int(r["qty"])
+            q = int(r["qty_run"])
             zero_rows += (q == 0)
             c_shift.append([
-                _day_date(r["day"]), r["shift"], _mach(r["press"]), r["SKUCode"],
+                _day_date(r["day"]), r["shift"], _mach(r["press"]),
+                str(r["press"]),                    # the MES wcID -- see below
+                r["SKUCode"],
                 r["gt_code"],                       # the planning key, see b_shift
                 _desc(r["SKUCode"]), st, en,
-                q, round(com, 1), round(clm, 1),
+                q, int(r["qty"]), int(r["qty_planned"]),
+                round(float(r["hours"]), 2),
+                round(com, 1), round(clm, 1),
                 round(ct_sku.get((plant, r["SKUCode"]),
                                  ct_gt.get((plant, r["gt_code"]), 0.0)), 1),
                 int(round(inv_day.get(int(r["day"]), 0.0))), None])
 
-        cured = {}
-        for r in cx.group_by("SKUCode").agg(pl.col("qty").sum()).iter_rows(named=True):
-            cured[r["SKUCode"]] = float(r["qty"])
+        # ---- DEMAND FULFILMENT, CURING SIDE -- the graded number -----------
+        # `Planned_Units` and `Fulfillment_Pct` used to be the NAMEPLATE over
+        # raw order-book demand and read PCR Aug 95.29 % against the same
+        # pack's graded 92.7 %. They are now L11's own numerator and
+        # denominator, split to SKUs by the cured-share rule, and the TOTAL row
+        # is the graded ratio to the tyre. The other three cure bases are kept
+        # as their own columns so nothing is lost and nothing can be confused.
+        cured, deliv, seated = {}, {}, {}
+        for r in cx.group_by("SKUCode").agg(
+                pl.col("qty_run").sum().alias("r"),
+                pl.col("qty").sum().alias("d"),
+                pl.col("qty_planned").sum().alias("n")).iter_rows(named=True):
+            cured[r["SKUCode"]] = float(r["r"])
+            deliv[r["SKUCode"]] = float(r["d"])
+            seated[r["SKUCode"]] = float(r["n"])
         cdf = []
         for k, dq in sorted(dsku.items(), key=lambda x: -x[1]):
             gt = gt_of_sku.get(k, k)
             gi = opn.get(gt, 0.0) * (dq / max(gt_dem.get(gt, dq), 1e-9))
-            pu = cured.get(k, 0.0)
-            gq = max(dq - pu, 0.0)
+            req_k = float(sku_den.get(k, 0.0))
+            pu = float(sku_num.get(k, 0.0))
+            gq = max(req_k - pu, 0.0)
             ct = ct_sku.get((plant, k))
-            cdf.append([k, gt, round(prio.get(k, 0.0), 4), int(dq), int(round(gi)),
+            cdf.append([k, gt, round(prio.get(k, 0.0), 4), int(dq),
+                        int(round(req_k)), int(round(gi)),
                         int(round(pu)), int(round(gq)),
-                        (pu / dq if dq else 0.0),
+                        (pu / req_k if req_k else 0.0),
+                        int(round(cured.get(k, 0.0))),
+                        int(round(deliv.get(k, 0.0))),
+                        int(round(seated.get(k, 0.0))),
                         "FULLY MET" if gq <= 0 else "PARTIAL",
                         round(ct if ct else ct_gt.get((plant, gt), 0.0), 1),
                         round(ct, 1) if ct else "NA",
                         elig_p.get(gt, 0),
                         round(elig_p.get(gt, 0) / 1.0, 2),
                         None if ct else "missing curing CT"])
-        # +1 blank at index 1 for GT_Code, so Demand/Planned/Gap/Pct stay under
-        # their own headers instead of shifting one column left.
-        cdf += [[None] * 14,
-                ["TOTAL", None, None, int(sum(dsku.values())), None,
-                 int(round(sum(cured.values()))),
-                 int(round(max(sum(dsku.values()) - sum(cured.values()), 0))),
-                 (sum(cured.values()) / max(sum(dsku.values()), 1)),
-                 None, None, None, None, None, None]]
+        _NC = 18
+        cdf += [[None] * _NC,
+                ["TOTAL", None, None, int(sum(dsku.values())),
+                 int(round(QP["denominator"])), None,
+                 int(round(QP["numerator"])),
+                 int(round(max(QP["denominator"] - QP["numerator"], 0))),
+                 QP["numerator"] / max(QP["denominator"], 1),
+                 int(round(QP["fed_in_month"])),
+                 int(round(QP["delivered_in_month"])),
+                 int(round(QP["nameplate"])),
+                 None, None, None, None, None,
+                 "Fulfillment_Pct = Planned_Units / Requirement = the number "
+                 "9b_l11_invariants grades. Nameplate_Seated is PRESS CAPACITY, "
+                 "never output -- see 9c_quantity_bridge in the csv pack."]]
 
+        # AVAILABLE MINUTES EXCLUDE THE PLANT CLOSURE (rule G3). A closed day
+        # is not idle press capacity: August booked 24 h of "idle" on every
+        # one of 165 presses on 2026-08-15 while the plant was shut.
+        p_avail = (ndays * 1440.0) - CLOSED_H[plant] * 60.0
         pu_rows = []
         for pr in sorted(c["press"].unique().to_list()):
             z = c.filter(pl.col("press") == pr)
@@ -723,18 +950,20 @@ def main() -> int:
             zc = mcp.filter(pl.col("press") == pr)
             com = float(zc["minutes"].sum())
             clean = MOULD_SETUP_MIN.get(plant, 0.0) * zc.height
-            idle = max(avail - used - com, 0.0)
-            pu_rows.append([_mach(pr), int(avail), int(round(used)),
+            idle = max(p_avail - used - com, 0.0)
+            pu_rows.append([_mach(pr), str(pr), int(p_avail), int(round(used)),
                             int(round(com)), int(round(clean)),
-                            int(round(idle)), round(used / avail, 4),
-                            round(com / avail, 4),
-                            round(clean / avail, 4), round(idle / avail, 4),
-                            round((used + com) / avail, 4),
+                            int(round(idle)), round(used / p_avail, 4),
+                            round(com / p_avail, 4),
+                            round(clean / p_avail, 4), round(idle / p_avail, 4),
+                            round((used + com) / p_avail, 4),
                             int(z["gt_code"].n_unique()),
-                            int(round(float(z["qty"].sum())
-                                      / max(2.0, 1))), int(round(float(z["qty"].sum()))),
+                            int(round(float(z["qty_run"].sum()) / 2.0)),
+                            int(round(float(z["qty_run"].sum()))),
+                            int(round(float(z["qty"].sum()))),
+                            int(round(float(z["qty_planned"].sum()))),
                             None])
-        _o = [x[10] for x in pu_rows] or [0]
+        _o = [x[11] for x in pu_rows] or [0]
         pu_title = (f"Avg util (occupancy = used+CO): {100*sum(_o)/len(_o):.1f}%"
                     f"  |  High(>=90%): {sum(1 for v in _o if v >= .9)}"
                     f"  |  Idle(<5%): {sum(1 for v in _o if v < .05)}"
@@ -745,43 +974,87 @@ def main() -> int:
                     f"CO_Mins (CTP setup master: PCR 90 / TBR 133.7 per change; "
                     f"the rest is press warm-up), not an addition -- occupancy "
                     f"charges CO_Mins once"
-                    f"  |  Machine = plant press no. from wcmaster 1.xlsx `name`")
+                    f"  |  Machine = plant press no. from wcmaster 1.xlsx `name`; "
+                    f"wc_id is the MES press id the csv pack uses -- crosswalk "
+                    f"in press_crosswalk.csv and csv/10_press_crosswalk.csv"
+                    f"  |  Available_Mins excludes {CLOSED_H[plant]:.0f} h of "
+                    f"plant closure"
+                    f"  |  Total_Units is tyres FED IN-MONTH (press-run basis); "
+                    f"Units_Delivered and Nameplate_Seated are the other two "
+                    f"bases -- see the csv pack's 9c_quantity_bridge")
 
         cco = [[_day_date(int(r["day"])), int(r["day"]), r["shift"],
-                _mach(r["press"]),
+                _mach(r["press"]), str(r["press"]),
                 r["from_gt"], r["to_gt"],
                 "same_size_CO" if r["same_rim"] else "diff_size_CO",
                 round(float(r["minutes"]), 1)] for r in mcp.iter_rows(named=True)]
 
         msch = []
         for r in (cx.group_by(["press", "SKUCode"])
-                  .agg(pl.col("qty").sum(), pl.col("hours").sum())
-                  .sort(["press", "qty"], descending=[False, True])
+                  .agg(pl.col("qty_run").sum(), pl.col("hours").sum())
+                  .sort(["press", "qty_run"], descending=[False, True])
                   .iter_rows(named=True)):
             gt = gt_of_sku.get(r["SKUCode"], r["SKUCode"])
             ct = ct_sku.get((plant, r["SKUCode"]), ct_gt.get((plant, gt), 0.0))
-            msch.append([_mach(r["press"]), r["SKUCode"],
+            msch.append([_mach(r["press"]), str(r["press"]), r["SKUCode"],
                          round(prio.get(r["SKUCode"], 0), 4),
-                         round(ct, 1), int(round(float(r["qty"]) / 2.0)),
-                         int(round(float(r["qty"]))),
+                         round(ct, 1), int(round(float(r["qty_run"]) / 2.0)),
+                         int(round(float(r["qty_run"]))),
                          int(round(float(r["hours"]) * 60.0)),
                          round(float(r["hours"]) / 24.0, 2)])
 
+        # ---- DAILY CURED, ON ALL THREE BASES -------------------------------
+        # This sheet drew a completely different day-1 from the csv pack's
+        # `7_daily_summary` -- August PCR 7,943 here against 11,974 there --
+        # because it prorated the NAMEPLATE over press hours while the csv
+        # sheet buckets DELIVERED tyres on `cure_ts`. Both curves are real and
+        # both now ship, in both files, under the same three names.
         dcur = []
         for dd in range(1, ndays + 1):
             z = cx.filter(pl.col("day") == dd)
-            dcur.append([_day_date(dd), int(round(float(z["qty"].sum())))])
-        dcur += [[None, None], ["TOTAL", int(round(float(cx["qty"].sum())))]]
+            dcur.append([_day_date(dd),
+                         int(round(float(z["qty_run"].sum()))),
+                         int(round(float(z["qty"].sum()))),
+                         int(round(float(z["qty_planned"].sum()))),
+                         round(float(z["hours"].sum()), 1),
+                         dd in CLOSE[plant]])
+        dcur += [[None] * 6,
+                 ["TOTAL", int(round(float(cx["qty_run"].sum()))),
+                  int(round(float(cx["qty"].sum()))),
+                  int(round(float(cx["qty_planned"].sum()))),
+                  round(float(cx["hours"].sum()), 1), None]]
 
+        # ---- GT GAP DIAGNOSTIC -- the hand-off to next month ---------------
+        # WAS `Closing_Balance = GT_Built - GT_Cured` with the correctly
+        # clipped build and the NAMEPLATE cure and no opening-stock column, so
+        # it reported PCR ending July 5,640 green tyres NEGATIVE where the plan
+        # hands 4,357 forward: 9,997 tyres, opposite sign, on the one number
+        # next month's plan starts from. The balance is
+        #     opening + built in-month - delivered-and-cured in-month
+        # which is L7's own `carry_forward_gt` definition and the csv pack's
+        # sheet-7 `gt_stock_at_0700_next_day`. All four now agree.
         gtg = []
         for k in sorted(cured, key=lambda x: -cured.get(x, 0)):
+            gt = gt_of_sku.get(k, k)
+            oq = opn.get(gt, 0.0) * (dsku.get(k, 0.0)
+                                     / max(gt_dem.get(gt, dsku.get(k, 1.0)), 1e-9))
             bq = built.get(k, 0.0)
-            cq = cured.get(k, 0.0)
-            gtg.append([k, int(round(bq)), int(round(cq)), int(round(bq - cq)),
-                        "DEMAND_MET" if cq >= dsku.get(k, 0) else "SHORT"])
-        gtg += [["TOTAL", int(round(sum(built.values()))),
-                 int(round(sum(cured.values()))),
-                 int(round(sum(built.values()) - sum(cured.values()))), None]]
+            dq_ = deliv.get(k, 0.0)
+            gtg.append([k, gt, int(round(oq)), int(round(bq)), int(round(dq_)),
+                        int(round(cured.get(k, 0.0))),
+                        int(round(seated.get(k, 0.0))),
+                        int(round(oq + bq - dq_)),
+                        "DEMAND_MET" if cured.get(k, 0.0) >= dsku.get(k, 0) else "SHORT"])
+        gtg += [[None] * 9,
+                ["TOTAL", None, int(round(QP["opening"])),
+                 int(round(QP["built"])),
+                 int(round(QP["delivered_in_month"])),
+                 int(round(QP["numerator"])),
+                 int(round(QP["nameplate"])),
+                 int(round(QP["closing_gt"])),
+                 "Closing = Opening + Built - Delivered. Equals "
+                 "carry_forward_gt.parquet and csv 7_daily_summary's last "
+                 "`gt_stock_at_0700_next_day`."]]
 
         # ---- the three MOULD sheets --------------------------------
         # The engine plans a GT to a COUNT of moulds (`cap_mould`), not to named
@@ -842,24 +1115,31 @@ def main() -> int:
                      f"in masters/mould_sku.parquet")
 
         _write(out / f"optimizer_curing_schedule_full_{stamp}_{plant}.xlsx", [
-            ("Demand Fulfillment", None,
-             ["SKUCode", "GT_Code", "Priority", "Demand", "GT_Inventory",
-              "Planned_Units", "Gap", "Fulfillment_Pct", "Status",
-              "CycleTime_min", "CT_available", "Eligible_Machines",
+            ("Demand Fulfillment",
+             f"Fulfillment_Pct = Planned_Units / Requirement = "
+             f"{QP['numerator']:,.0f} / {QP['denominator']:,.0f} = "
+             f"{QP['pct']:.1f}% -- the number 9b_l11_invariants grades. "
+             f"Demand is the raw order book and is NOT the denominator. "
+             f"Nameplate_Seated is press capacity, never output.",
+             ["SKUCode", "GT_Code", "Priority", "Demand", "Requirement",
+              "GT_Inventory", "Planned_Units", "Gap", "Fulfillment_Pct",
+              "Fed_In_Month", "Delivered_In_Month", "Nameplate_Seated",
+              "Status", "CycleTime_min", "CT_available", "Eligible_Machines",
               "Presses_Needed", "Skip_Reason"], cdf),
             ("Machine Utilization", pu_title,
-             ["Machine", "Available_Mins", "Used_Mins", "CO_Mins",
+             ["Machine", "wc_id", "Available_Mins", "Used_Mins", "CO_Mins",
               "Mould_Clean_Mins", "Idle_Mins", "Utilization_Pct", "CO_Pct",
               "Mould_Clean_Utilization_%", "Idle_Pct", "Occupancy_Pct",
-              "SKUs_Count", "total_cycle", "Total_Units",
-              "Remaining_Mould_Life"], pu_rows),
+              "SKUs_Count", "total_cycle", "Total_Units", "Units_Delivered",
+              "Nameplate_Seated", "Remaining_Mould_Life"], pu_rows),
             ("Shift Schedule", None,
-             ["Date", "Shift", "Machine", "SKUCode", "GT_Code", "Description",
-              "StartTime", "EndTime", "Qty", "CO_Mins", "Mould_Clean_Mins",
+             ["Date", "Shift", "Machine", "wc_id", "SKUCode", "GT_Code",
+              "Description", "StartTime", "EndTime", "Qty", "Qty_Delivered",
+              "Nameplate_Seated", "Press_Hours", "CO_Mins", "Mould_Clean_Mins",
               "CycleTime_min", "GT_Inventory", "Remarks"], c_shift),
             ("Changeover Plan", None,
-             ["Date", "Day", "Shift", "Press", "From_SKU", "Target_SKU",
-              "CO_Type", "Mins"], cco),
+             ["Date", "Day", "Shift", "Press", "wc_id", "From_SKU",
+              "Target_SKU", "CO_Type", "Mins"], cco),
             ("Mould Tracker", mt_title,
              ["Press", "Mould", "SKU_Built", "Day_Mounted",
               "Mould_Eligible_For_SKU", "Shared_Mould",
@@ -871,16 +1151,54 @@ def main() -> int:
              ["Date", "SKU Code", "Description", "Mould in USE",
               "Total Eligible Moulds"], miu),
             ("Machine Schedule", f"Press-SKU pairs: {len(msch)}  |  "
-             f"Total Units: {int(round(float(cx['qty'].sum()))):,}",
-             ["Machine", "SKUCode", "Priority", "CycleTime_min", "Cycles",
-              "Units_Planned", "Mins_Used", "Days_Used"], msch),
-            ("Daily Cured tyres", None, ["Date", "Cured_Qty"], dcur),
-            ("GT Gap Diagnostic", None,
-             ["SKUCode", "GT_Built", "GT_Cured", "Closing_Balance", "Reason"], gtg),
+             f"Total Units (tyres FED IN-MONTH): "
+             f"{int(round(float(cx['qty_run'].sum()))):,}",
+             ["Machine", "wc_id", "SKUCode", "Priority", "CycleTime_min",
+              "Cycles", "Units_Planned", "Mins_Used", "Days_Used"], msch),
+            ("Daily Cured tyres",
+             f"Cured_Qty is tyres FED IN-MONTH spread over the press hours the "
+             f"campaign holds (sums to {QP['fed_in_month']:,.0f}). "
+             f"Delivered_Qty is csv 7_daily_summary `cured` "
+             f"({QP['delivered_in_month']:,.0f}). Nameplate_Seated is press "
+             f"capacity, NOT output ({QP['nameplate']:,.0f} whole-plan, "
+             f"{float(cx['qty_planned'].sum()):,.0f} in-month).",
+             ["Date", "Cured_Qty", "Delivered_Qty", "Nameplate_Seated",
+              "Press_Hours", "Plant_Closed"], dcur),
+            ("GT Gap Diagnostic",
+             f"Closing_Balance = Opening + Built - Delivered = "
+             f"{QP['opening']:,.0f} + {QP['built']:,.0f} - "
+             f"{QP['delivered_in_month']:,.0f} = {QP['closing_gt']:,.0f} green "
+             f"tyres handed to next month.",
+             ["SKUCode", "GT_Code", "Opening_GT", "GT_Built", "GT_Delivered",
+              "GT_Cured_In_Month", "Nameplate_Seated", "Closing_Balance",
+              "Reason"], gtg),
         ])
         print(f"  {plant}  curing shift rows {len(c_shift):,}  zero-qty "
               f"{zero_rows:,} ({100*zero_rows/max(len(c_shift),1):.1f}%)   "
               f"building shift rows {len(b_shift):,}")
+        # ---- PROVE THIS WORKBOOK AGREES WITH THE CSV PACK AND WITH L11 ----
+        # Every one of these came out DIFFERENT before 2026-08-21; see
+        # PROBLEM 3. They are asserted here, per plant, at export time.
+        _chk = [
+            ("Demand Fulfillment TOTAL Planned_Units", cdf[-1][6], QP["numerator"]),
+            ("Demand Fulfillment TOTAL Requirement", cdf[-1][4], QP["denominator"]),
+            ("Daily Cured tyres TOTAL Cured_Qty", dcur[-1][1], QP["fed_in_month"]),
+            ("Daily Cured TOTAL Delivered_Qty", dcur[-1][2],
+             QP["delivered_in_month"]),
+            ("GT Gap TOTAL Closing_Balance", gtg[-1][7], QP["closing_gt"]),
+            ("Daily GT & Carcass sum GT_Produced", sum(r[1] for r in daily),
+             sum(int(r["qty"]) for r in ssx.iter_rows(named=True))),
+            ("building Shift Schedule sum Qty", sum(r[6] for r in b_shift),
+             sum(int(r["qty"]) for r in ssx.iter_rows(named=True))),
+        ]
+        for _lbl, _got, _want in _chk:
+            _ok = abs(float(_got) - float(_want)) <= 1.0
+            print(f"  {plant}  AGREEMENT  {_lbl:<40}{float(_got):>10,.0f} vs "
+                  f"{float(_want):>10,.0f}   {'OK' if _ok else '!! MISMATCH'}")
+        _mine = f"{QP['pct']:.1f}%"
+        _l11s = QQ["_l11"].get(plant, "(absent)")
+        print(f"  {plant}  AGREEMENT  Fulfillment_Pct {_mine} vs L11 {_l11s}   "
+              f"{'OK' if _mine == _l11s else '!! MISMATCH'}")
         # ---- the three things the user asked to be able to trust ----
         _pn_hit = sum(1 for p in c["press"].unique().to_list()
                       if str(p) in press_no)
@@ -928,6 +1246,31 @@ def main() -> int:
                         "link is mined, not a lookup)",
             "example": ", ".join(_mn[:3])})
     pl.DataFrame(src_rows).write_csv(out / "machine_number_source.csv")
+
+    # ---- THE PRESS CROSSWALK, SHIPPED ------------------------------------
+    # These workbooks name presses with the plant's own `press_no` (4806); the
+    # csv pack names the same press with the MES `wc_id` (120). 0 of 165
+    # identifiers overlap, and until now the crosswalk shipped in NEITHER file,
+    # so a supervisor holding both could not match one row. It ships in both
+    # now: here, and as `csv/10_press_crosswalk.csv`.
+    _xw = sorted({str(p) for p in cs["press"].unique().to_list()})
+    pl.DataFrame([{
+        "wc_id": k, "press_no": press_no.get(k, ""),
+        "resolved": bool(press_no.get(k)),
+        "used_in_this_workbook_as": "Machine / wc_id columns",
+        "used_in_csv_pack_as": "press (2_cure_schedule_shift, 2b, 3, 6)",
+        "source": ("warehouse/derived/wc_master.parquet, name -> press_no, "
+                   "keyed by iD = MES wcID"
+                   if press_no.get(k) else "UNRESOLVED -- no wcmaster row"),
+    } for k in _xw]).write_csv(out / "press_crosswalk.csv")
+
+    # ---- THE QUANTITY LADDER, SHIPPED BESIDE THE WORKBOOKS ---------------
+    # Same frame as the csv pack's `9c_quantity_bridge`, from the same
+    # function, so the two packs cannot describe the plan differently.
+    quantity_bridge(QQ).write_csv(out / "quantity_bridge.csv")
+    print(f"  -> press_crosswalk.csv  ({sum(1 for k in _xw if press_no.get(k))}"
+          f"/{len(_xw)} presses resolved)")
+    print("  -> quantity_bridge.csv  (identical to csv/9c_quantity_bridge.csv)")
 
     # ---- the unresolved BTP machine-code map, shipped as evidence ------
     wm = _wcm_rows

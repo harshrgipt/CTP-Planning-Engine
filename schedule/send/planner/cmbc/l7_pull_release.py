@@ -148,6 +148,101 @@ TAIL_PULL = os.environ.get("PLANNER_L7_TAIL_BUILD_PULL", "0") != "0"
 # Rebuild the closing GT floor to the opening level so the month hands over
 # what it inherited. See the block at _hzn for why. Default OFF until measured.
 CLOSING_BUFFER = os.environ.get("PLANNER_L7_CLOSING_BUFFER", "0") != "0"
+# ---- BUFFER_SETUP: RESERVE THE CHANGEOVER AT BOTH ENDS OF A TOPPED-UP GAP ----
+# WHAT THIS DOES / WHY IT EXISTS -- a measured defect, found 2026-08-21.
+#   The closing buffer fills a machine's idle gap from edge to edge. It charges
+#   NO changeover to either edge, so a top-up run of a different GT can start
+#   the instant the previous run ends and end the instant the next one starts.
+#   The machine is then asked to change size in zero minutes, twice.
+#   With the flag on, each gap is shrunk by _setup_s(prev_gt -> g) on the left
+#   and _setup_s(g -> next_gt) on the right before anything is sized into it.
+#
+#   RESERVING THE SETUP *IS* THE 24 h MACHINE-DAY BUDGET, not a proxy for it.
+#   Once every production interval and every changeover interval on a machine is
+#   disjoint, their total inside any 07:00->07:00 window is <= 24 h by
+#   construction. Measured on MD_base (August): production alone never exceeds
+#   24 h on any machine-day -- it is exactly AT 24.00 h -- and all three PCR
+#   machine-days that breach do so because setup is added on top of a day the
+#   buffer already filled. Both violation classes have one cause.
+#
+# SHIPS OFF. MEASURED 2026-08-21, AUGUST, BOTH PLANTS. Fresh arms via
+# scripts/run_arm.py, all FRESH, partition stamped 2026-08,
+# PLANNER_L7_CLOSING_BUFFER=1 and PLANNER_HOLIDAYS=2026-08-15 pinned on every arm.
+#
+#   PCR              BUILT   dBUILT   in-month   md>24h  excess h  unresCO   L11
+#   MD_base2       409,511       +0    397,326      3/343   4.22       11    31/52
+#   BUFFER_SETUP=1 409,411     -100    397,326      0/343   0.00        0    31/52
+#
+#   TBR              BUILT   dBUILT   in-month   md>24h  excess h  unresCO   L11
+#   MD_base2        98,003       +0     96,932      0/274   0.00        1    31/52
+#   BUFFER_SETUP=1  98,003       +0     96,932      0/274   0.00        0    31/52
+#
+# scripts/verify_export.py on the exported pack, which imports no planner code:
+#   base  VERDICT: plan is NOT physically executable (2 hard violations)
+#           - changeover time not reserved: 12 of 1269 transitions, 6.9 h short
+#           - machine-day over 24 h: 2 of 597, worst TBMPCR10Stage2 day 30
+#             = 25.17 h (prod 23.40 + setup 1.77)
+#   arm   VERDICT: plan is physically executable (0 hard violations)
+#           all 597 machine-days fit 24 h incl. setup, max exactly 24.00 h
+#
+# THE PRICE IS EXACTLY 100 TYRES AND IT IS NOT A CASCADE. 5,631 of the 5,646
+# build_schedule rows are IDENTICAL between the two arms; only the 15 buffer
+# runs move, and the PCR buffer total goes 3,018 -> 2,918. in-month, tail,
+# starvation and its cause vector, R5, same-size, weighted changeover, GT
+# daily-mean max and all 52 invariants are unchanged. TBR pays nothing -- its
+# four buffer gaps had the slack to absorb one 10 min reservation.
+#
+# THE TRAP IN READING THIS: -100 sits far inside the +-800 August PCR noise
+# floor (DO-NOT #49), and a null control run beside it -- LOT_INTERVAL_H
+# perturbed by 36 SECONDS in a 16 h grid -- swung PCR BUILT 0..+706, mean +235
+# sd 365. So the SIGN of this arm is not measurable as a volume result. It is
+# not offered as one: the result is the two HARD violations going to zero on an
+# independent verifier, and 100 tyres is the receipt.
+BUFFER_SETUP = os.environ.get("PLANNER_L7_BUFFER_SETUP", "0") != "0"
+# ---- R5 ENFORCED ON THE FIRST TYRE OF A SLICE, NOT THE LAST -----------------
+# WHAT THIS DOES / WHY IT EXISTS -- a measured defect, found 2026-08-21.
+#   `_place` tests `t_cure - slice_END` against the 72 h shelf life. A slice is
+#   built continuously, so its FIRST tyre comes off `slice hours` earlier and
+#   waits that much longer -- and it is the first tyre that expires, not the
+#   last. Measured on MD_base (August): true max 65.58 h PCR / 73.45 h TBR
+#   against the 63.27 / 71.71 the test sees, with 26 TBR tyres already past
+#   72 h in the shipped plan.
+#   With the flag on, `_place` and `_r5_floor` both offset by (cum - qty).
+#
+# SHIPS OFF -- it REFUSES placements the plan currently takes, so it should cost
+# volume by construction. The GRADING is fixed unconditionally in l11 and in
+# l7's own gate print; only the enforcement is behind this flag.
+#
+# MEASURED 2026-08-21, AUGUST, BOTH PLANTS. Fresh arms, CLOSING_BUFFER=1 and
+# HOLIDAYS=2026-08-15 pinned on every arm.
+#
+#   PCR is BYTE-IDENTICAL to base -- it never approaches the bound (65.58 h).
+#
+#   TBR             BUILT   dBUILT   in-month   starved   R5 1st tyre  >72 h   L11
+#   MD_base2       98,003       +0     96,932     1,654     73.45 h      26   31/52
+#   R5_FIRST=1     98,192     +189     97,084     1,465     70.85 h       0   33/52
+#
+# AND THE NULL CONTROL SAYS THE +189 IS NOTHING (DO-NOT #49). Perturbing
+# PLANNER_LOT_INTERVAL_TBR -- a 6 to 30 MINUTE change in a 16 h release grid,
+# no physical meaning at that resolution -- gives TBR dBUILT:
+#
+#   15.5 h   15.9 h   [16.0 base]   16.1 h   16.5 h
+#   -207     +100          0        +166     +204        mean +66, sd 187
+#
+# +189 sits inside one sd of the mean of physically equivalent settings. Worse
+# for the naive reading: THREE of those four null arms ALSO land under 72 h with
+# zero tyres over shelf life, and MD_nt159 scores the identical 33/52 with the
+# identical two invariants flipping. So on August the volume gain, the R5 number
+# AND the L11 count are all reachable by accident.
+#
+# WHAT IS NOT REACHABLE BY ACCIDENT, AND IS THE ONLY REASON TO SHIP THIS:
+# with the flag ON the bound is ENFORCED -- `_place` and `_r5_floor` both test
+# the first tyre, so no placement can breach it. With it OFF the plan's
+# compliance is a coin-flip of the greedy: the baseline happens to breach by
+# 1.45 h on 26 tyres and four physically-identical plans happen not to.
+# A rule that holds by luck is not held. Grade this on the guarantee, never on
+# the +189.
+R5_FIRST_TYRE = os.environ.get("PLANNER_L7_R5_FIRST_TYRE", "0") != "0"
 # LEVEL-LOAD THE BUILD: release EVERY run as early as R5 allows, not just
 # tail-cure runs. Targets the idle-machine days (Jul PCR day 24 = 95 idle h
 # at 64 % utilisation with the SAME changeover count as an 86 % day), where
@@ -456,6 +551,118 @@ def _starve_cause(d: dict) -> str:
 # prices the COLD START (a cure early on day 1 whose build must precede day 1)
 # without pretending the resulting file is a shippable month plan.
 DIAG_PRE_H = float(os.environ.get("PLANNER_DIAG_PRE_H", "0")) if DIAG else 0.0
+
+# ---- BOUNDED PRE-t0 BUILDING WINDOW (PLANNER_L7_PRE_T0_H) ------------------
+# WHAT THIS DOES / WHY IT EXISTS -- a measured defect, found 2026-08-21.
+#   The horizon starts hard at t0 = the 1st, 07:00, and building may not be
+#   released before it. The PLANT HAS NO SUCH WALL: 48.8-57.6 % of everything it
+#   cured in a month's first 12 h was built in the previous month, and 98-100 %
+#   of presses carry the same mould across the boundary. A cure seated on day 1
+#   needs its green tyre finished at t_cure - tau*, which for the earliest seats
+#   is BEFORE the month exists, so the run is refused and its tyres starve.
+#   August 2026: 55 % of PCR starvation (6,810 tyres) and 81 % of TBR's (1,341)
+#   is cause `release_before_t0`, and 100 % of it is short by LESS THAN 8 h
+#   (PCR p50 3.50 h max 4.45 h, TBR p50 2.15 h max 6.73 h).
+#
+#   This flag opens a BOUNDED window of `H` hours before t0 in which building
+#   -- and only building -- may be released. Cure campaigns do not move, t0 and
+#   month_end are unchanged, R5 is enforced on every slice exactly as before,
+#   and the WIP rail still books the resulting stock (its hour grid clamps a
+#   pre-t0 credit into hour 0, which is where that stock physically is at t0).
+#
+#   READ THE LABEL CAREFULLY BEFORE READING THE RESULT. Section 4aj proved that
+#   `release_before_t0` does NOT mean "the deadline precedes the horizon" -- the
+#   placer walks BACKWARDS past every conflicting interval, so it means "the
+#   backward cascade ran out of calendar". A slice with t_cure on the 27th and
+#   t0_short_h = 3.8 h is a machine-CONTENTION failure. Widening the calendar
+#   backwards relieves both classes, because nothing is booked before t0, so a
+#   recovery here is NOT evidence that the starvation was a cold start.
+#
+# THE TYRES ARE BUILT IN THE PREVIOUS MONTH AND ARE NOT THIS MONTH'S OUTPUT.
+#   Any scorer that sums `build_schedule.qty` unfiltered will absorb them into
+#   BUILT and read this flag as free volume. It is not free: it spends the
+#   PREVIOUS month's machine hours. Split on `end_ts <= t0` and report the two
+#   halves separately -- see PARTITION_AND_CHANGEOVER.md 4ak.1, which is the
+#   same defect one boundary along.
+#
+# SHIPS OFF (H = 0 -> byte-identical to the closed-box behaviour: verified,
+# all nine plan artefacts sha1-equal to base).
+# MEASURED 2026-08-21, AUGUST 2026, BOTH PLANTS. Fresh arms via
+# scripts/run_arm.py on partition stamped 2026-08, all `check_arm_fresh` FRESH.
+# Baseline = the shipped defaults + PLANNER_L7_CLOSING_BUFFER=1.
+#
+#   PCR    BUILT(Aug)  dBUILT  pre_t0  in-month   ful%  starved  bt0    r5   L11
+#   base      409,511      +0       0   397,326  92.59   12,477  6,810  5,044  32
+#   H=4       408,551    -960   1,383   397,823  92.70   12,125  1,409  9,170  31
+#   H=8       408,448  -1,063   2,732   398,890  92.95   10,879    305  9,493  32
+#   H=12      406,424  -3,087   3,334   397,786  92.69   12,135  1,380  9,111  31
+#
+#   TBR    BUILT(Aug)  dBUILT  pre_t0  in-month   ful%  starved  bt0    r5
+#   base       98,003      +0       0    96,932  97.89    1,654  1,341     87
+#   H=4        98,363    +360     378    97,670  98.64      916    603     87
+#   H=8        97,576    -427     804    97,309  98.27    1,277    964     87
+#   H=12       97,609    -394     817    97,356  98.32    1,231    332    341
+#
+# WHAT IT ESTABLISHES, AND THE TRAP IN READING IT.
+#   The window does what it was built to do: `release_before_t0` collapses on
+#   PCR, 6,810 -> 305 at H = 8 (-95 %). It does NOT produce tyres. `r5_shelf_life`
+#   rises 5,044 -> 9,493 in the same arm, so 75 % of the relieved starvation is
+#   simply re-refused one gate down, and TOTAL starvation falls only 1,598.
+#   THE 72 h SHELF LIFE WAS ALWAYS THE BINDING CONSTRAINT; t0 was in front of it.
+#   Give the backward cascade more calendar and it walks back until R5 stops it.
+#
+#   **Read only in-month, H = 8 looks like +1,564 tyres and +0.36 pt. It is not.**
+#   August's own BUILT FALLS 1,063 while 2,732 tyres appear that JULY built. The
+#   entire in-month gain, and more, is imported across the boundary. This is
+#   4ak.1's defect one boundary along: a scorer that sums build_schedule.qty
+#   unfiltered reads a 1,063-tyre loss as a 1,669-tyre win.
+#
+#   The mechanism of the PCR loss is visible in the counters: `gt_wip_rail`
+#   refusals go 623 -> 1,081 (H=8) / 1,546 (H=4). Building earlier IS inventory,
+#   and PCR already sits at its rail margin (daily-mean max 4,522 against a
+#   4,800 rail x 0.94 = 4,512 enforcement point). The window buys starvation
+#   relief with rail headroom that does not exist.
+#
+#   Same-size share pays for it too: 69.3 -> 66.6 % (H=8) and weighted changeover
+#   fails L11 outright at H=4 (74.3) and H=12 (74.8) against the plant's 74.0.
+#   H is NOT monotone in anything -- H=12 is worse than H=8 on every PCR line and
+#   TBR's only positive BUILT cell is H=4 (+360), which reverses at H=8 (-427).
+#   A lever whose sign flips with its own magnitude is a reshuffle, not a
+#   mechanism (DO-NOT #15's cousin).
+#
+# AND THE HOURS ARE NOT AVAILABLE. Checked per machine against `runs/SHIP2_jul`,
+# the shipped July plan -- not against a month total, because a month total of
+# free hours says nothing about any one machine (DO-NOT #19, #22):
+#
+#   H=8 PCR: claim 52.7 machine-h, of which **18.95 h double-books a machine
+#            July already has running**. 6 of 10 machines over.
+#   H=8 TBR: claim 50.2 machine-h, **16.96 h double-booked**, 4 of 9 over.
+#
+# July's last 8 h hold 48.1 free PCR / 45.6 free TBR machine-hours in aggregate,
+# which reads as ample -- and TBMPCR9/10 are 100 % busy while TBMPCR2/4/6/7 are
+# idle. The window takes the busy ones anyway. So even the measured recovery is
+# an OVER-estimate of what a real carry-in could deliver.
+#
+# AND IT DOES NOT EXPORT. `scripts/verify_export.py` on the H=8 pack adds a
+# third HARD violation the baseline does not have -- "build row outside the
+# plant month: 66 start outside" -- plus two EXPORT reconciliation failures
+# (sheet1 404,463 vs sheet7 400,428 PCR; 97,440 vs 96,332 TBR), because the
+# shift pack's sheet 1 keeps the pre-t0 rows and its sheet 7 daily summary does
+# not. The pack disagrees with itself about how many tyres August built. Shipping
+# this needs the export layer to learn the concept as well, which is more work
+# than the measurement justifies.
+#
+# VERDICT: the carry-in question is REAL and this is the first bounded, runnable
+# measurement of it -- but at the sizes the plant can actually lend, it is worth
+# roughly 1,600 tyres of starvation relief on PCR for 1,063 tyres of August
+# output, 2.7 pt of same-size share and a rail it cannot afford. **The prize
+# named in the brief is not there.** Put the number to the plant; do not ship it.
+# Full record: PARTITION_AND_CHANGEOVER.md 4aq.
+#
+# THIS IS NOT `PLANNER_DIAG_PRE_H`. That one is DIAG-gated, unbounded in intent,
+# and its output is explicitly not a runnable plan. This one is bounded, ships in
+# a normal run, and tags its rows so the accounting stays honest.
+PRE_T0_H = float(os.environ.get("PLANNER_L7_PRE_T0_H", "0"))
 if DIAG and os.environ.get("PLANNER_DIAG_SHELF_H"):
     GT_SHELF_LIFE_H = float(os.environ["PLANNER_DIAG_SHELF_H"])
     print(f"  !! DIAGNOSTIC ONLY: R5 shelf life overridden to "
@@ -480,6 +687,99 @@ HARD_LOCK = os.environ.get("PLANNER_HARD_LOCK", "1") != "0"
 # plant allowable matrix.  Matched July/August runs both recovered fed volume,
 # so this is now the default; set the flag to 0 only to reproduce the control.
 ALLOWABLE_RESCUE = os.environ.get("PLANNER_ALLOWABLE_RESCUE", "1") != "0"
+
+# ---- RESCUE, BUT NOT ONTO A HARD-TIER MACHINE ------------------------------
+# `ALLOWABLE_RESCUE` is the only path that leaves a machine's mined rim lock,
+# and it does not distinguish tiers. Measured 2026-08-20 against the plant's own
+# July MES (400,336 rows with a known rim):
+#
+#            PLANT off-lock     OURS
+#   hard          0.0 %         7.7 %      <- the plant NEVER breaks a hard lock
+#   primary       9.8 %        20.1 %
+#   flex         23.7 %        52.9 %
+#   TOTAL         5.3 %        15.7 %
+#
+# A `hard` machine is defined as single-rim at ~100 % purity over 8 months; the
+# plant honours that exactly. We put 16,957 (Jul) / 14,794 (Aug) foreign-rim
+# tyres on them. Turning the whole rescue off fixes it (hard 7.6 -> 1.1 %) and
+# costs PCR -4,980 / -16,154 BUILT, so a blanket refusal is not the answer.
+# This flag is the middle path: keep the rescue for `primary` and `flex`, where
+# the plant itself mixes, and refuse it on `hard`.
+# SHIPPED ON 2026-08-20 ON PLANT INSTRUCTION, WITH THE COST STATED AND ACCEPTED.
+# Cost: PCR -1,076 BUILT / -0.26 pt (Jul), -5,441 / -1.17 pt (Aug). TBR byte-
+# identical. Hard-tier off-lock 7.6 -> 0.9 % (Jul), 6.2 -> 0.5 % (Aug). L11
+# 31 -> 32. The blanket `ALLOWABLE_RESCUE=0` alternative was measured and is
+# strictly worse on both axes: -4,980 / -16,154 BUILT for WORSE hard-tier
+# compliance (1.1 / 0.7 %). Full record: PARTITION_AND_CHANGEOVER.md 4ao.
+# Set to 0 to reproduce the pre-2026-08-20 control.
+RESCUE_SKIP_HARD = os.environ.get("PLANNER_RESCUE_SKIP_HARD", "1") == "1"
+
+# ---- WHICH TIERS THE OFF-LOCK RESCUE MAY NOT ENTER (PLANNER_RESCUE_SKIP_TIERS)
+# WHAT THIS DOES / WHY IT EXISTS -- a measured gap, found 2026-08-21.
+#   `RESCUE_SKIP_HARD` above closed the `hard` tier and left `primary` open. On
+#   August PCR the plan then sits at 29.1 % off-lock on `primary` against the
+#   plant's own 9.8 % -- three times looser on the tier that carries 42,195 of
+#   our 67,770 off-lock tyres. `flex` is EXEMPT BY DESIGN: the plant's own flex
+#   machine runs 23.7 % off-lock and mixing is what it is for (4q.6, DO-NOT #33).
+#
+#   The comma-separated list generalises the boolean. `hard` reproduces the
+#   shipped behaviour exactly; `hard,primary` is the arm this exists to test.
+#   `RESCUE_SKIP_HARD=0` still empties the set, so the pre-2026-08-20 control is
+#   unchanged.
+#
+# THE HYPOTHESIS IT WAS BUILT TO TEST.
+#   A diff-size changeover costs 42-60 min against 22-28 for same-size, so
+#   refusing off-lock rescues on `primary` should buy back machine hours and
+#   partly pay for its own volume loss. That is a hypothesis, not a reason --
+#   it is to be TESTED, and the same-size share and the weighted changeover
+#   minutes per machine-day must be reported beside BUILT or the test is not a
+#   test. Result table below, filled in from the run, whatever its sign.
+#
+# SHIPS AS `hard` (= the shipped behaviour: verified byte-identical to base on
+# all nine plan artefacts).
+# MEASURED 2026-08-21, AUGUST 2026, BOTH PLANTS. Fresh arms via
+# scripts/run_arm.py, partition stamped 2026-08, `check_arm_fresh` FRESH.
+#
+#   PCR              BUILT   dBUILT  in-month   ful%  starved  same%  wCO   occ%  L11
+#   hard (shipped) 409,511       +0   397,326  92.59   12,477   69.3  73.6  83.7   32
+#   hard,primary   398,272  -11,239   388,690  90.57   23,465   74.7  66.5  81.5   33
+#
+#   primary off-lock 29.1 % -> 16.0 %   ·   hard off-lock 0.5 % -> 0.9 % (WORSE)
+#   R5 max 63.3 -> 71.9 h (against a 72 h cap)  ·  carry-out tail 12,620 -> 10,268
+#   weighted setup 458.6 h -> 426.0 h  ·  changeovers 838 -> 817
+#   TBR: every aggregate IDENTICAL (BUILT 98,003, starved 1,654, R5 71.7 h,
+#   same-size 100.0 %) -- 8 of its 9 machines are hard/primary, and none of them
+#   was carrying a foreign rim to begin with, so closing them only reshuffles
+#   which press each slice feeds. (Note for 4ao, which says TBR is *byte*-
+#   identical: at `hard,primary` the per-row assignment DOES move -- qty, cure_ts
+#   and wait_h all differ -- while every total holds. Identical KPIs, different
+#   file.)
+#
+# THE HYPOTHESIS IS REFUTED, AND BOTH HALVES OF IT MOVED THE PREDICTED WAY.
+#   Same-size share rose 5.4 pt and weighted changeover fell 7.1 min/machine-day
+#   -- 32.6 hours of setup genuinely freed, and it bought back nothing. Machine
+#   OCCUPANCY FELL 83.7 -> 81.5 %, which on 11 machines x 744 h is ~180 machine-
+#   hours LOST. We saved 33 hours of setup and lost 180 hours of production.
+#   The refused runs do not become cheaper work somewhere else; they become no
+#   work at all. `r5_shelf_life` starvation goes 5,044 -> 18,362 and R5 max
+#   climbs to 71.9 h, one tenth of an hour under the cap.
+#
+#   It also does not reach compliance. `primary` lands at 16.0 %, still above the
+#   plant's own 9.8 %, and hard-tier off-lock gets WORSE (0.5 -> 0.9 %) because
+#   runs the rescue would have taken are placed by other paths that also leave
+#   the lock. That is 4ao's own finding reproduced one tier up: refusing more is
+#   both dearer and dirtier. The second, untraced leak named in 4ao's "Residual"
+#   is what puts the floor under both numbers.
+#
+#   The one thing bought is a single invariant: "PCR same-size share of build
+#   changeovers" flips FAIL -> PASS (L11 32 -> 33). 11,239 tyres for one green
+#   cell is not a trade; it is a metric being satisfied at the plan's expense.
+#
+# VERDICT: DEFAULT STAYS `hard`. Kept gated, with its number, so nobody re-runs
+# it blind. Full record: PARTITION_AND_CHANGEOVER.md 4ar.
+_SKIP_TIERS_ENV = os.environ.get("PLANNER_RESCUE_SKIP_TIERS", "hard")
+RESCUE_SKIP_TIERS = {t.strip().lower()
+                     for t in _SKIP_TIERS_ENV.split(",") if t.strip()}     if RESCUE_SKIP_HARD else set()
 
 # ---- RIM PRIORITY: the inch lock as a PRIORITY with sequential campaigns ----
 #
@@ -707,7 +1007,42 @@ CLUSTER_SEQ_KEY = os.environ.get("PLANNER_CLUSTER_SEQ_KEY", "rc").strip().lower(
 # changing this default. Cross-reference: §4v (EDD, a DIFFERENT change -- that
 # one DROPPED the deadline at L5 and lost 3.8 pt; this one keeps it and only
 # reorders inside a bucket at L7).
-PINNED_FIRST_H = float(os.environ.get("PLANNER_L7_PINNED_FIRST", "0"))
+# SHIPS AT 8 ON PCR, OFF ON TBR. Measured 2026-08-20, fresh arms, both months,
+# on the closing-buffer baseline. This is the largest single fulfilment lever
+# found in this project.
+#
+#            BUILT      in-month    starved     L11      R5 max
+#   Jul PCR  +6,059     +1.52 pt    -6,059      30->31
+#   Aug PCR  +5,625     +1.31 pt    -5,625      31->32   62.7 -> 61.4 h
+#   Jul TBR    -335     -0.43 pt      +335
+#   Aug TBR    -122     -0.16 pt      +122               71.7 -> 68.1 h
+#
+# The gain is EXACTLY the starvation reduction on both months, i.e. real tyres,
+# not relocation. `BUILT = campaigns - starved` is the only equation that moves
+# fulfilment on this plant, and this is the only lever measured to move the
+# right term.
+#
+# WHY IT WORKS -- most-constrained-first, and the constraint is real. August PCR
+# starvation by machine breadth of the starved GT:
+#     base      14,389 of 18,311 (79 %) on GTs allowed 1-2 machines
+#     pinned=8   5,942 of 12,686 (47 %)
+# `GT 2568 HT2` (ONE allowed machine) starves 4,622 on base and leaves the top
+# six entirely under the flag. r5_shelf_life starvation also halves, 4,536 ->
+# 2,060, because a constrained GT no longer waits for its only machine.
+#
+# TBR IS SCOPED OUT. It loses 122-335 tyres on both months. TBR's GTs are not
+# machine-constrained the way PCR's are (2 single-machine GTs vs PCR's 12), so
+# reordering only displaces work. Plant-scoped via PLANNER_L7_PINNED_FIRST_PLANTS.
+#
+# DO NOT COMBINE WITH RIM_PRIORITY. Measured together on August: +5,253 against
+# +5,625 for pinned alone -- rim's extra switches eat part of the gain. They are
+# better apart.
+#
+# 8 h was not swept. If it is ever tuned, gate on BUILT on BOTH months and BOTH
+# plants; a value that helps July and hurts August fails.
+_PF_PLANTS = {x.strip().upper() for x in
+              os.environ.get("PLANNER_L7_PINNED_FIRST_PLANTS", "PCR").split(",") if x.strip()}
+PINNED_FIRST_H = float(os.environ.get("PLANNER_L7_PINNED_FIRST", "8"))
 
 # Try the GT's OWN pinned machine before any rim-mate (P7 / B9 / B10 / B14).
 #
@@ -1019,6 +1354,19 @@ def main() -> None:
     y, m = int(a.month[:4]), int(a.month[5:7])
     t0 = datetime(y, m, 1, 7, 0)
     _mend = t0 + timedelta(days=calendar.monthrange(y, m)[1])
+    # THE BUILD CALENDAR FLOOR, WHICH IS NOT ALWAYS t0.
+    # `t0` stays the horizon anchor for everything that is graded, bucketed or
+    # reported against the month -- the rail's hour grid, the deadline heap's
+    # buckets, the campaign arithmetic. `_t0b` is the earliest instant a BUILD
+    # RUN may start, and it is the only thing PLANNER_L7_PRE_T0_H moves. Keeping
+    # them as two names is the point: one file, one meaning per symbol, so a
+    # later reader cannot widen the horizon by editing the build floor.
+    # Identical to t0 when both windows are 0 -> byte-identical plan.
+    _t0b = t0 - timedelta(hours=max(PRE_T0_H, DIAG_PRE_H))
+    if _t0b < t0:
+        print(f"  [pre-t0] building may be released from "
+              f"{_t0b:%Y-%m-%d %H:%M} ({(t0 - _t0b).total_seconds()/3600:.1f} h "
+              f"before t0) -- PREVIOUS MONTH's machine hours, not this month's")
 
     # OPENING GT IS SUPPLY AT t0, NOT JUST A DEMAND OFFSET.
     # L4 nets opening stock off demand, but L7 previously tried to BUILD every
@@ -1278,6 +1626,7 @@ def main() -> None:
     # eligibility penalty, and counted in the "spilled past their pin" report.
     _tier_rank = {"hard": 0, "primary": 1, "flex": 2}
     lock_of: dict[tuple, list] = {}          # (plant, rim) -> machines, best first
+    _hard_mc: set = set()
     _lockf = paths.INPUT_DERIVED / "machine_rim_lock.parquet"
     if _lockf.exists():
         for r in (pl.read_parquet(_lockf)
@@ -1287,6 +1636,13 @@ def main() -> None:
                 (_tier_rank.get(r["tier"], 3), int(r["rank"]), r["machine"]))
         for k in lock_of:
             lock_of[k] = [m for _t, _r, m in sorted(lock_of[k])]
+        if RESCUE_SKIP_TIERS:
+            _hard_mc.update(
+                (r["plant"], r["machine"])
+                for r in pl.read_parquet(_lockf).iter_rows(named=True)
+                if str(r["tier"]).lower() in RESCUE_SKIP_TIERS)
+            print(f"  [rescue] {','.join(sorted(RESCUE_SKIP_TIERS))}-tier machines "
+                  f"closed to off-lock rescue: {len(_hard_mc)}")
 
     # ---- TARGETED RIM SPILL (§12: a quantified exception, never a global relax)
     #
@@ -2536,7 +2892,7 @@ def main() -> None:
                 # R5 or the rail, the original start is still evaluated.
                 _tries = [st]
                 if SLIVER[p] > 0.0:
-                    _pe = t0
+                    _pe = _t0b
                     for (ivs, ive, ivgt, _ivr) in busy.get(mach, []):
                         if ive <= st:
                             _pe = max(_pe, ive + timedelta(
@@ -2558,7 +2914,7 @@ def main() -> None:
                     # other four counters could not be written. Four dict
                     # increments on a rejected candidate cost nothing next to the
                     # datetime arithmetic already in this loop.
-                    if _st < t0 - timedelta(hours=DIAG_PRE_H):
+                    if _st < _t0b:
                         _diag_last["before_t0"] = _diag_last.get("before_t0", 0) + 1
                         _diag_last["t0_short_h"] = max(
                             _diag_last.get("t0_short_h", 0.0),
@@ -2581,7 +2937,20 @@ def main() -> None:
                     # when slices share a cure time the FIRST-BUILT slice waits
                     # longest, so 10 breaches passed a guard that only ever saw
                     # the last one.
-                    worst = max((d["t_cure"] - (_st + timedelta(seconds=cu * c)))
+                    # AND THE SAME ERROR ONE LEVEL DOWN (R5_FIRST_TYRE, off by
+                    # default). `cu` is the cumulative AFTER slice j, so
+                    # `_st + cu*c` is that slice's END -- the last tyre in it.
+                    # The FIRST tyre of slice j comes off at
+                    # `_st + (cu - qty)*c` and waits its whole span longer, so
+                    # it is the one that expires. Measured on MD_base (August):
+                    # the plan's true max is 65.58 h PCR / 73.45 h TBR against
+                    # the 63.27 / 71.71 this test sees, and 26 TBR tyres are
+                    # past 72 h. Enforcing it REMOVES legal placements, so it is
+                    # a flag and it is measured, not assumed -- see 4bf.
+                    worst = max((d["t_cure"]
+                                 - (_st + timedelta(
+                                     seconds=(cu - (d["qty"] if R5_FIRST_TYRE
+                                                    else 0.0)) * c)))
                                 .total_seconds() / 3600.0
                                 for d, cu in zip(grp, cums))
                     if worst > GT_SHELF_LIFE_H:
@@ -2668,9 +3037,17 @@ def main() -> None:
                  d["qty"]) for d, cu in zip(rec["grp"], rec["cums"])]
 
     def _r5_floor(rec: dict):
-        """Earliest start this run may legally take: R5 on every slice, and t0."""
-        return max([t0] + [d["t_cure"] - timedelta(hours=GT_SHELF_LIFE_H)
-                           - timedelta(seconds=cu * rec["c"])
+        """Earliest start this run may legally take: R5 on every slice, and the
+        build calendar floor `_t0b` (= t0 unless PLANNER_L7_PRE_T0_H opens a
+        bounded pre-horizon window). R5 is unconditional either way.
+
+        Under R5_FIRST_TYRE the offset is the slice's START (cu - qty), not its
+        end -- the first tyre off the drum is the one that expires. That is a
+        LATER floor, i.e. strictly less room, which is the honest direction.
+        Kept in step with the identical expression in `_place`."""
+        return max([_t0b] + [d["t_cure"] - timedelta(hours=GT_SHELF_LIFE_H)
+                           - timedelta(seconds=(cu - (d["qty"] if R5_FIRST_TYRE
+                                                      else 0.0)) * rec["c"])
                            for d, cu in zip(rec["grp"], rec["cums"])])
 
     def _make_room(p: str, gt: str, cand: list, grp: list) -> bool:
@@ -2709,7 +3086,7 @@ def main() -> None:
             mine = {"plant": p, "gt": gt, "st": ideal, "c": c, "grp": grp,
                     "cums": cums, "dur": dur, "mach": mach}
             lo = _r5_floor(mine)
-            if ideal < lo or ideal < t0:
+            if ideal < lo or ideal < _t0b:
                 _mr_fail["cold"] = _mr_fail.get("cold", 0) + 1
                 continue
             recs = sorted(placed.get(mach, []), key=lambda r: r["st"])
@@ -2745,7 +3122,7 @@ def main() -> None:
             # shut plant. Snap each candidate to the latest start whose whole
             # span is clear. Identity with no calendar configured.
             ubs = [holiday.fit_before(p, u, dur) for u in ubs]
-            ubs = sorted({u for u in ubs if u >= max(lo, t0)}, reverse=True)
+            ubs = sorted({u for u in ubs if u >= max(lo, _t0b)}, reverse=True)
             if not ubs:
                 _mr_fail["late"] = _mr_fail.get("late", 0) + 1
                 continue
@@ -2768,7 +3145,7 @@ def main() -> None:
                     # HOLIDAY: compaction moves incumbents EARLIER, which is
                     # exactly how a run lands inside a closure. Same snap.
                     want = holiday.fit_before(r["plant"], lim - r["dur"], r["dur"])
-                    floor_r = max(_r5_floor(r), t0)
+                    floor_r = max(_r5_floor(r), _t0b)
                     if want < floor_r:              # cannot get out of the way
                         ok_cascade = False
                         _mr_gap.append(((want - floor_r).total_seconds() / 3600.0,
@@ -2904,6 +3281,14 @@ def main() -> None:
         k = _hkey_base(t, g, p)
         if PINNED_FIRST_H <= 0.0:
             return k                       # byte-identical to the shipped key
+        # PLANT SCOPE: measured -122/-335 BUILT on TBR both months, so TBR is
+        # excluded. It must keep the SAME TUPLE SHAPE -- both plants share one
+        # heap, and returning a bare `k` for TBR while PCR returns a 3-tuple
+        # makes heapq compare str against int and abort the run. Constant
+        # (0, 0) prefix leaves TBR ordering decided entirely by `k`, i.e.
+        # byte-identical to the shipped key, while PCR gets the real buckets.
+        if p and p.upper() not in _PF_PLANTS:
+            return (0, 0, k)
         # (deadline bucket, eligible-machine count, <the whole shipped key>).
         # The shipped key is NESTED, not replaced: inside a bucket the pinned
         # jobs go first, and everything below -- cluster sequencing, the true
@@ -3229,6 +3614,13 @@ def main() -> None:
         # `_place`.  Trying the extras separately also means a flexible machine
         # cannot displace a feasible home/rim placement above.
         _extra = [m for m in cand if m not in set(_lk)]
+        if _hard_mc:
+            # A hard-tier machine is single-rim in 8 months of MES and the plant
+            # breaks it 0.0 % of the time. Do not let the last-resort pass be the
+            # thing that does. `flex` always stays open -- mixing is its job --
+            # and `primary` stays open unless PLANNER_RESCUE_SKIP_TIERS names it,
+            # which is measured NEGATIVE (4ar) and is not the default.
+            _extra = [m for m in _extra if (p, m) not in _hard_mc]
         if ALLOWABLE_RESCUE and _extra:
             if (_place(p, gt, _extra, grp, EARLY_CAP_H)
                     or _place(p, gt, _extra, grp, float("inf"))
@@ -3725,18 +4117,25 @@ def main() -> None:
                      .iter_rows(named=True)):
             _have[(_r["plant"], _r["gt_code"])] = float(_r["qty"])
         # machine occupancy inside the window, from bs itself -- no shared state
+        # THE GT TRAVELS WITH THE INTERVAL (third element). Without it a gap has
+        # no idea which GT it abuts, and a changeover cannot be priced -- which
+        # is exactly why this pass charged none for the whole project. It costs
+        # one string per row and is read only by the BUFFER_SETUP block below,
+        # so with the flag off every gap is byte-identical to before.
         _occ: dict = {}
         for _r in bs.filter((pl.col("machine") != "OPENING_STOCK")
                             & (pl.col("end_ts") > pl.lit(_win))).iter_rows(named=True):
             _occ.setdefault(_r["machine"], []).append(
-                (max(_r["start_ts"], _win), _r["end_ts"]))
+                (max(_r["start_ts"], _win), _r["end_ts"], _r["gt_code"]))
         # HOLIDAY: the closing buffer finds IDLE GAPS and fills them. A shut
         # plant reads as the largest idle gap in the month, so book it here too.
         # (CLOSING_BUFFER ships OFF, so this is correctness, not measurement.)
+        # The sentinel GT is what `_setup_s` prices at zero -- a shutdown is not
+        # a changeover, so a run may abut a closure with no reservation.
         for _m, _iv in _hol_iv.items():
             for _s2, _e2 in [(x[0], x[1]) for x in _iv]:
                 if _e2 > _win:
-                    _occ.setdefault(_m, []).append((max(_s2, _win), _e2))
+                    _occ.setdefault(_m, []).append((max(_s2, _win), _e2, _HOL_GT))
         for _m in _occ:
             _occ[_m].sort()
         _add, _built_extra = [], {"PCR": 0.0, "TBR": 0.0}
@@ -3752,22 +4151,51 @@ def main() -> None:
                 if _def < _floor:
                     break
                 # latest free gap on this machine inside the window
+                # Each gap carries the GT on its LEFT and on its RIGHT so the
+                # changeover at either edge can be priced. `_pg` is the GT of
+                # whichever block currently ends at the frontier `_cur`; it is
+                # None for the very first gap of the window (nothing precedes
+                # it inside the scan) and for the trailing gap's right edge
+                # (nothing follows it before month end).
                 _iv = _occ.get(_mach, [])
                 _cur = _win
+                _pg = None
                 _gaps = []
-                for _a, _b2 in _iv:
+                for _a, _b2, _ggt in _iv:
                     if _a > _cur:
-                        _gaps.append((_cur, _a))
-                    _cur = max(_cur, _b2)
+                        _gaps.append((_cur, _a, _pg, _ggt))
+                    if _b2 >= _cur:
+                        _cur, _pg = _b2, _ggt
                 if _cur < _mend:
-                    _gaps.append((_cur, _mend))
+                    _gaps.append((_cur, _mend, _pg, None))
+                # ---- RESERVE THE CHANGEOVER AT BOTH EDGES (BUFFER_SETUP) ----
+                # See the flag block at the top of the file. This is the whole
+                # fix for "machine-day over 24 h" and "changeover time not
+                # reserved": both are the same unbooked setup, counted twice.
+                # Applied BEFORE the month-end clip so the right edge is priced
+                # against the true next occupancy even when that block starts
+                # after `_mend` (the carry-out tail).
+                if BUFFER_SETUP:
+                    # `_setup_s` takes None only on its FIRST argument (it means
+                    # "nothing ran before"); a None on the second would fall
+                    # through to rim_of.get(None) and silently charge a
+                    # different-size changeover to an edge that has no next run.
+                    def _edge(_ga2, _gb2):
+                        return 0.0 if (_ga2 is None or _gb2 is None) \
+                            else _setup_s(_p, _mach, _ga2, _gb2)
+                    _gaps = [
+                        (_ga + timedelta(seconds=_edge(_lg, _g)),
+                         _gb - timedelta(seconds=_edge(_g, _rg)),
+                         _lg, _rg)
+                        for (_ga, _gb, _lg, _rg) in _gaps]
                 # CLIP EVERY GAP TO THE MONTH END. Existing runs can finish
                 # AFTER month end (the carry-out tail), so a gap derived from
                 # them can start and end in September. Unclipped, the buffer
                 # scheduled runs on 1-2 Sep -- outside the month it was meant to
                 # close, with cure_ts BEFORE end_ts, which surfaced as 7 R17
                 # "cured before minimum ageing" violations.
-                _gaps = [(a, min(b, _mend)) for a, b in _gaps if a < _mend]
+                _gaps = [(a, min(b, _mend)) for a, b, _lg, _rg in _gaps
+                         if a < _mend]
                 # LATEST-ENDING GAP FIRST, NOT LARGEST.
                 #
                 # This buffer exists to hand the NEXT month a stocked floor, so
@@ -3819,8 +4247,26 @@ def main() -> None:
                                  "wait_h": ((_mend + timedelta(hours=1.0))
                                             - _en).total_seconds() / 3600.0,
                                  "run_id": bs["run_id"][0] if bs.height else ""})
-                    _occ.setdefault(_mach, []).append((_gs, _en))
+                    _occ.setdefault(_mach, []).append((_gs, _en, _g))
                     _occ[_mach].sort()
+                    # ---- ANY PATH THAT APPENDS TO `bs` MUST WRITE `busy` -----
+                    # PARTITION_AND_CHANGEOVER.md 4av, the seventh always-passing
+                    # guard found in this project. `busy` is populated only in
+                    # `_place` and `_make_room`, and BOTH of L7's own feasibility
+                    # gates below iterate it -- so for the whole life of the
+                    # closing buffer they printed
+                    #     machine double-booking          : 0  PASS
+                    #     setup not reserved (changeover) : 0 of N  PASS
+                    # while the exported pack carried different-size changeovers
+                    # at a 0.0 min gap on TBMPCR10Stage2 and others, and only the
+                    # independent verifier ever saw them.
+                    # Written UNCONDITIONALLY, not under BUFFER_SETUP: nothing
+                    # downstream of here reads `busy` except the gates, so this
+                    # changes what is REPORTED and cannot change a single tyre.
+                    # With BUFFER_SETUP off the gates now FAIL, which is the
+                    # true state of the plan they are grading.
+                    busy.setdefault(_mach, []).append(
+                        (_gs, _en, _g, rim_of.get(_g, "")))
                     _def -= _n
                     _built_extra[_p] += _n
                     if _def < _floor:
@@ -3832,6 +4278,30 @@ def main() -> None:
                   f"PCR +{_built_extra['PCR']:,.0f} · TBR +{_built_extra['TBR']:,.0f} "
                   f"tyres built in the last {GT_SHELF_LIFE_H - R5_SAFETY_H:.0f} h "
                   f"and handed to next month")
+
+    # ---- PRE-t0 CLAIM REPORT (PLANNER_L7_PRE_T0_H) ------------------------
+    # The window's whole cost is machine hours the PREVIOUS month has to be able
+    # to give us. Print the claim per plant AND per machine so it can be checked
+    # against the previous month's own plan before anyone quotes the recovery.
+    # Printed, not persisted -- runs/<arm>/log_l7_pull_release.txt is the record.
+    if _t0b < t0:
+        _pre = bs.filter((pl.col("machine") != "OPENING_STOCK")
+                         & (pl.col("start_ts") < pl.lit(t0)))
+        if _pre.height:
+            _u = _pre.group_by(["plant", "machine", "gt_code",
+                                "start_ts", "end_ts"]).agg(pl.col("qty").sum())
+            print("  [pre-t0] MACHINE HOURS BORROWED FROM THE PREVIOUS MONTH:")
+            for _p in ("PCR", "TBR"):
+                _up = _u.filter(pl.col("plant") == _p)
+                if not _up.height:
+                    continue
+                _h = sum((min(r["end_ts"], t0)
+                          - r["start_ts"]).total_seconds() / 3600.0
+                         for r in _up.iter_rows(named=True))
+                _q = float(_up.filter(pl.col("end_ts") <= pl.lit(t0))["qty"].sum())
+                print(f"    {_p}  {_h:8.1f} machine-h  {_q:8,.0f} tyres finished "
+                      f"before t0 (NOT this month's output)  "
+                      f"{_up['machine'].n_unique()} machines")
 
     bs.write_parquet(run / "build_schedule.parquet")
     # ---- C3: BUILD CARRY-OUT -- the building half of the boundary ----------
@@ -3974,9 +4444,17 @@ def main() -> None:
                 _short_h += (need - gap) / 3600.0
     print(f"    setup not reserved (changeover) : {_short} of {_trans} transitions"
           f"  {'PASS' if _short == 0 else f'FAIL ({_short_h:.1f} h short)'}")
-    late = bs.filter(pl.col("wait_h") > GT_SHELF_LIFE_H).height
-    print(f"    GT wait > {GT_SHELF_LIFE_H:.0f} h (R5)          : {late}  "
-          f"{'PASS' if late == 0 else 'FAIL'}")
+    # GRADED ON THE FIRST TYRE OF THE SLICE. `wait_h` is cure_ts - end_ts, the
+    # LAST tyre off the drum; the first waits the whole slice longer and it is
+    # the first that expires. Same defect as the L11 invariant of this name --
+    # see the block there for the four-cell table. This gate read PASS on August
+    # while 26 TBR tyres were past 72 h.
+    late = bs.filter(((pl.col("cure_ts") - pl.col("start_ts"))
+                      .dt.total_seconds() / 3600.0) > GT_SHELF_LIFE_H).height
+    _late_end = bs.filter(pl.col("wait_h") > GT_SHELF_LIFE_H).height
+    print(f"    GT wait > {GT_SHELF_LIFE_H:.0f} h (R5, 1st tyre): {late}  "
+          f"{'PASS' if late == 0 else 'FAIL'}"
+          f"   (graded at slice end: {_late_end})")
     early = bs.filter(pl.col("wait_h") < 0).height
     print(f"    built AFTER cure (impossible)   : {early}  "
           f"{'PASS' if early == 0 else 'FAIL'}")
@@ -4200,6 +4678,64 @@ def main() -> None:
                   f"carry-out tail {float(rp['qty_fed'].sum()-rp['qty_fed_in_month'].sum()):>7,.0f} · "
                   f"opening stock consumed {_op:>6,.0f}")
 
+    # ---- OPENING STOCK THAT EXPIRES UNUSED -- REPORTED, NEVER SILENT -----
+    #
+    # WHAT THIS DOES / WHY IT EXISTS -- a measured defect, found 2026-08-21
+    #   The line above says how much opening stock was CONSUMED and stops there.
+    #   The gap between what the month opened with and what it drew was never
+    #   named anywhere: August PCR 5,132 held / 3,453 drawn / **1,679 expired**,
+    #   TBR 1,266 / 794 / **472**; July PCR 4,820 / 3,951 / **869**, TBR 1,297 /
+    #   855 / **442**. 3,462 already-built tyres over two months, none of them
+    #   aged out at t0 (August age p50 6-15 h, max 55.9 h, ZERO rows over 72 h).
+    #   They are legal on arrival and die because their GT's first cure campaign
+    #   is 11-30 days away.
+    #
+    #   THIS PROJECT ALREADY HAD A LINE FOR IT AND THE LINE COULD NOT FIRE. The
+    #   guard 90 lines below printed when `_og_tot - _og_used > 0.5`, where
+    #   `_og_tot` is the DECREMENTED residual (i.e. the unused stock itself) and
+    #   `_og_used` is the consumption. It therefore asked "is the leftover bigger
+    #   than the amount drawn?" and answered no on every plant-month the project
+    #   has ever run -- 1,679 vs 3,453 on August PCR. Fifth always-passing guard
+    #   after `l4b_capacity_flow` (§4al), the L4.5 R5 gate (§4ai), B16's one-sided
+    #   feasibility (§4k) and the staleness warning (§4o). Fixed at its site.
+    #
+    # THE SPLIT IS LOAD-BEARING, so it is printed and not just the total. Stock
+    # on a GT with NO cure campaign this month is a DEMAND fact -- the plan has
+    # nothing to cure it into and no placement change can reach it (August: 656
+    # of 1,679 PCR, 240 of 472 TBR). Only the stock on a GT the plan DOES cure
+    # is addressable by scheduling, and that is the number to grade. Quoting the
+    # total as a scheduling opportunity overstates it by ~40 %.
+    _first_camp: dict[tuple, object] = {}
+    for _r in (rec.group_by(["plant", "gt_code"])
+               .agg(pl.col("start_ts").min().alias("st")).iter_rows(named=True)):
+        _first_camp[(_r["plant"], _r["gt_code"])] = _r["st"]
+    _exp_addr: dict[str, float] = {}
+    print("\n  OPENING STOCK THAT EXPIRES UNUSED  (already built, in shelf life "
+          "at t0, never drawn)")
+    for p in ["PCR", "TBR"]:
+        _rows = sorted(((g, q) for (pp, g), q in opening.items()
+                        if pp == p and q > 0.5), key=lambda x: -x[1])
+        _held = sum(v for (pp, _g), v in _opening0.items() if pp == p)
+        _tot = sum(q for _g, q in _rows)
+        _nc = sum(q for g, q in _rows if (p, g) not in _first_camp)
+        _late = sum(q for g, q in _rows
+                    if (p, g) in _first_camp
+                    and ((_first_camp[(p, g)] - t0).total_seconds() / 3600.0
+                         > opening_life.get((p, g), 0.0)))
+        _exp_addr[p] = _tot - _nc
+        print(f"    {p}: held {_held:>6,.0f}  drawn {_held - _tot:>6,.0f}  "
+              f"EXPIRED {_tot:>6,.0f} on {len(_rows):>2} GTs   "
+              f"[no campaign this month {_nc:,.0f} · first cure past its own "
+              f"shelf life {_late:,.0f} · other {_tot - _nc - _late:,.0f}]")
+        for g, q in _rows[:8]:
+            _fc = _first_camp.get((p, g))
+            _fh = ((_fc - t0).total_seconds() / 3600.0) if _fc is not None else None
+            print(f"        {g:<32}{q:>7,.0f}  life left {opening_life.get((p, g), 0.0):>5.1f} h"
+                  f"  first cure "
+                  + ("none this month" if _fh is None else f"t0+{_fh:,.0f} h"))
+        if len(_rows) > 8:
+            print(f"        ... and {len(_rows) - 8} more GTs")
+
     # ---- CARRY-FORWARD GT: THE MONTH-END HAND-OFF ------------------------
     # The point of planning past the boundary. A green tyre BUILT inside the
     # month whose cure falls OUTSIDE it is not waste and not lost demand -- it is
@@ -4267,23 +4803,37 @@ def main() -> None:
         print(f"  {p:<6}{s.height:>9,}{s['gt_code'].n_unique():>6}"
               f"{np.percentile(a,50):>9.1f}{np.percentile(a,95):>9.1f}"
               f"{a.max():>9.1f}{scrap:>16,}{_bal:>16,.0f}")
-        # RECONCILIATION, not a report. Carry-forward IS the closing balance
-        # minus whatever opening stock was never drawn (that stock is > 72 h old
-        # at hand-off and is scrap, not inventory -- see below).
-        _og_left = max(0.0, sum(v for (pp, _g), v in opening.items() if pp == p)
-                       - float(bs.filter((pl.col("plant") == p)
-                                         & (pl.col("machine") == "OPENING_STOCK")
-                                         )["qty"].sum()))
+        # RECONCILIATION, not a report. Carry-forward IS the closing balance.
+        #
+        # `_og_left` USED TO BE `max(0, residual - consumed)` AND WAS ALWAYS 0.
+        # `opening` is decremented as stock is drawn, so that expression asked
+        # whether the leftover exceeds the draw -- 1,679 vs 3,453 on August PCR
+        # -- and answered no in every plant-month, which is the only reason this
+        # check has ever passed. The right answer is 0 for a REASON, not by
+        # arithmetic accident: undrawn opening stock is never credited into
+        # `gt_events` (only the OPENING_STOCK slices that were actually fed are,
+        # +use at t0 and -use at the cure), so it is not in `_bal` and must not
+        # be added to `s.height`. Verified on 2026-08: PCR carry 4,514 == closing
+        # 4,514, TBR 793 == 793, with 1,679 / 472 undrawn outside both.
+        # The undrawn quantity is reported in its own block above.
+        _og_left = 0.0
         if abs((s.height + _og_left) - _bal) > 1.0:
             print(f"    ** CARRY/LEDGER MISMATCH {p}: carry {s.height:,} + "
                   f"undrawn opening {_og_left:,.0f} vs closing balance "
                   f"{_bal:,.0f}")
     for p in ["PCR", "TBR"]:
+        # THE ALWAYS-PASSING GUARD, FIXED. This printed when
+        # `_og_tot - _og_used > 0.5` -- residual minus consumption -- so it asked
+        # whether the leftover was bigger than the draw and never fired on any
+        # plant-month this project has run (August PCR 1,679 vs 3,453). The
+        # quantity it was written to name is `_og_tot` itself, because `opening`
+        # is already decremented by every draw. Full breakdown, with the cause
+        # split and the GT list, is in the OPENING STOCK THAT EXPIRES UNUSED
+        # block above; this line stays because it is the one that sits beside the
+        # hand-off and says the tyres do NOT roll forward.
         _og_tot = sum(v for (pp, _g), v in opening.items() if pp == p)
-        _og_used = float(bs.filter((pl.col("plant") == p)
-                                   & (pl.col("machine") == "OPENING_STOCK"))["qty"].sum())
-        if _og_tot - _og_used > 0.5:
-            print(f"    {p}: {_og_tot - _og_used:,.0f} tyres of THIS month's "
+        if _og_tot > 0.5:
+            print(f"    {p}: {_og_tot:,.0f} tyres of THIS month's "
                   f"opening stock were never drawn -- they are >{GT_SHELF_LIFE_H:.0f} h "
                   f"old at hand-off and do NOT roll forward (scrap, not inventory)")
     print(f"    -> {_cff.relative_to(ROOT)}   "

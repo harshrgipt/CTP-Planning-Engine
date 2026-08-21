@@ -121,7 +121,12 @@ def main() -> None:
     #
     # To measure it, move the reference month to one with a successor on disk
     # (June 2026 has July). That is a planning decision, not a code one.
-    ap.add_argument("--lookahead-days", type=int, default=0,
+    # ENV FALLBACK so the flag is reachable from `scripts/run_arm.py`, which
+    # passes only `--month` to the month-scoped layers. Default 0 = inert; the
+    # CLI arg still wins when given. Without this the ONE mechanism designed to
+    # fix the month-end demand-horizon dip cannot be A/B'd at all.
+    ap.add_argument("--lookahead-days", type=int,
+                    default=int(os.environ.get("PLANNER_LOOKAHEAD_DAYS", "0") or 0),
                     help="append the first N days of month M+1 demand so building "
                          "has something to pull at the end of M; rows are tagged "
                          "`lookahead` and must be excluded when scoring month M")

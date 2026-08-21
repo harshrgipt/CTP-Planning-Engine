@@ -1,0 +1,2 @@
+id,plant_name,product_name,plan_month,holiday_name,holiday_type,start_date,end_date,is_full_day,impacted_shifts,remarks,created_at,created_by,updated_at,updated_by
+9c1a41bf-1bad-4765-9771-11faab2917ef,BTP,PCR,2026-07,"fun day",COMPANY_EVENT,2026-07-15,2026-07-15,1,NULL,check,"2026-08-20 18:00:40",21781a20-312d-478d-af37-1be9dfc375d9,"2026-08-20 18:00:40",21781a20-312d-478d-af37-1be9dfc375d9

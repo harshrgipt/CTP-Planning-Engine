@@ -33,10 +33,15 @@ WHY IT IS DATA AND NOT A CAP
                           A bare date closes BOTH plants. `PLANNER_HOLIDAYS=`
                           (set but empty) is an explicit "no holidays" and
                           suppresses the file, so an arm can prove the negative.
-    2. masters/holidays_<month>.json
+    2. the BTP holiday TABLE (csv), searched in this order -- ranges, per-product
+       scope and partial-day shifts, which a flat date list cannot express:
+            masters/holidays_<month>.csv
+            masters/holidays.csv
+            <wrapper root>/holiday.csv
+    3. masters/holidays_<month>.json
                             ["2026-08-15"]                       both plants
                             {"all": [...], "PCR": [...], "TBR": [...]}
-    3. absent -> EMPTY -> every function below is the identity, so a run with no
+    4. absent -> EMPTY -> every function below is the identity, so a run with no
        holiday file and no env var is BYTE-IDENTICAL to the engine without this
        module. That claim is verified, not assumed -- see the measurement block.
 
@@ -178,6 +183,94 @@ def _window(d: date) -> tuple[datetime, datetime]:
     return s, s + timedelta(days=1)
 
 
+# ---- SHIFTS ---------------------------------------------------------------
+# The plant day is 07:00 -> 07:00 and splits A 07-15 / B 15-23 / C 23-07. A
+# partial closure (`is_full_day = 0`) names the shifts it takes out, so the
+# window is narrower than 24 h. C wraps past midnight into the NEXT calendar
+# day but is still the SAME plant-day -- that is the 28.7 % mislabelling defect
+# in MEMORY, and getting it wrong here would close the wrong day.
+_SHIFT_H = {"A": (0, 8), "B": (8, 16), "C": (16, 24)}   # hours after 07:00
+
+
+def _shift_windows(d: date, shifts) -> list[tuple[datetime, datetime]]:
+    """Windows for named shifts on plant-day `d`; all three == the full day."""
+    base = datetime(d.year, d.month, d.day, DAY_START_H, 0)
+    names = []
+    if isinstance(shifts, str):
+        shifts = shifts.replace("|", ",").replace(";", ",").split(",")
+    for x in shifts or []:
+        x = str(x).strip().upper()
+        if x in _SHIFT_H:
+            names.append(x)
+    if not names:                       # unparseable -> treat as a FULL closure
+        return [_window(d)]             # never silently schedule into it
+    return _merge([(base + timedelta(hours=a), base + timedelta(hours=b))
+                   for a, b in (_SHIFT_H[n] for n in names)])
+
+
+def _daterange(a: date, b: date) -> list[date]:
+    if b < a:
+        a, b = b, a
+    return [a + timedelta(days=i) for i in range((b - a).days + 1)]
+
+
+def read_btp_csv(path, month: str) -> dict[str, list[tuple[datetime, datetime]]]:
+    """Parse the BTP holiday table into per-plant closure windows.
+
+    THE PLANT'S OWN SCHEMA, and the reason this function exists. BTP stores
+    holidays as one row per entry with a DATE RANGE and an optional shift list:
+
+        id, plant_name, product_name, plan_month, holiday_name, holiday_type,
+        start_date, end_date, is_full_day, impacted_shifts, remarks,
+        created_at, created_by, updated_at, updated_by
+
+    Mapping, and each one has bitten somewhere before:
+      * `product_name` is OUR plant -- PCR / TBR. `plant_name` is the SITE
+        (BTP) and is deliberately ignored; a site column read as a plant column
+        would close both plants for every row.
+      * `plan_month` is advisory. A closure on 1 September is a real constraint
+        on an August campaign that runs into the 72 h horizon tail, so rows are
+        filtered by their DATES falling in [month, month + 72 h), never by this
+        column. It is checked only to warn on an obvious mis-file.
+      * `start_date`/`end_date` are INCLUSIVE plant-days, so a 3-day festival is
+        one row, not three.
+      * `is_full_day = 0` uses `impacted_shifts`; anything unparseable closes the
+        WHOLE day. Failing open would schedule production into a shut plant.
+      * a blank `product_name` (or `ALL`) closes both plants.
+    """
+    import csv
+    per: dict[str, list[tuple[datetime, datetime]]] = {p: [] for p in PLANTS}
+    y, m = int(month[:4]), int(month[5:7])
+    lo = date(y, m, 1)
+    hi = (date(y + (m == 12), (m % 12) + 1, 1)) + timedelta(days=4)   # + horizon tail
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        for row in csv.DictReader(fh):
+            row = {(k or "").strip().lower(): (v.strip() if isinstance(v, str) else v)
+                   for k, v in row.items()}
+            sd, ed = row.get("start_date", ""), row.get("end_date", "") or row.get("start_date", "")
+            if not sd:
+                continue
+            try:
+                a, b = date.fromisoformat(sd[:10]), date.fromisoformat(ed[:10])
+            except ValueError:
+                raise SystemExit(f"!! holidays: bad date in {path}: {sd!r}/{ed!r}")
+            days = [d for d in _daterange(a, b) if lo <= d < hi]
+            if not days:
+                continue
+            prod = (row.get("product_name") or "").upper()
+            targets = [prod] if prod in PLANTS else list(PLANTS)
+            full = str(row.get("is_full_day", "1")).strip().upper()
+            is_full = full not in ("0", "FALSE", "NO", "N")
+            shifts = row.get("impacted_shifts") or ""
+            if str(shifts).upper() in ("NULL", "NONE", "NAN"):
+                shifts = ""
+            for p_ in targets:
+                for d in days:
+                    per[p_].extend([_window(d)] if is_full or not shifts
+                                   else _shift_windows(d, shifts))
+    return per
+
+
 def _merge(ws: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
     """Merge touching/overlapping windows so consecutive holidays are one hole.
 
@@ -215,6 +308,32 @@ def load(month: str) -> None:
                 for p in PLANTS:
                     per[p].extend(_parse_dates(tok))
     else:
+        # ---- SOURCE 2: the BTP holiday table, the plant's own format --------
+        # Preferred over the JSON because it is what the frontend and BTP both
+        # write: ranges, per-product scope and partial-day shifts, none of which
+        # a flat date list can express. Searched next to the month masters first,
+        # then at the wrapper root where BTP drops it.
+        _csvs = [paths.holidays(month).with_suffix(".csv"),
+                 paths.MASTERS / "holidays.csv",
+                 paths.DATA_ROOT / "holiday.csv"]
+        _csv = next((c for c in _csvs if c.exists()), None)
+        _json = paths.holidays(month)
+        if _csv is not None:
+            # NEVER SHADOW A CALENDAR SILENTLY. The CSV wins, but a JSON sitting
+            # beside it is a calendar somebody armed, and dropping it without a
+            # word is how a plant gets scheduled into a day it told us was shut.
+            # This bit me during development: an unrelated `holiday.csv` at the
+            # wrapper root made a month with an armed JSON read as ACTIVE=False.
+            if _json.exists():
+                print(f"  [holidays] !! BOTH {_csv.name} and {_json.name} exist -- "
+                      f"the CSV wins and {_json.name} is IGNORED. Delete one.")
+            _w = read_btp_csv(_csv, month)
+            for p in PLANTS:
+                _WINDOWS[p] = _merge(_w[p])
+            ACTIVE = any(_WINDOWS[p] for p in PLANTS)
+            print(f"  [holidays] source {_csv} -> " + summary())
+            return
+
         f = paths.holidays(month)
         if f.exists():
             try:

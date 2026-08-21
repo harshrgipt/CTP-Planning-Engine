@@ -1,0 +1,48 @@
+sku,qty,plant,gt_code,gt_src,reason,desc
+1325221715100SRAT1,24.0,PCR,GT 2015 RAN ATW,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,215/75 R15 RANGER AT 100S RWL
+1325216514079TUTR0,308.0,PCR,GT 1604 UXT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,165/65R14_UX TOURING_79T TL
+1D25116814008QXPC0,414.0,PCR,GT 1624 XPC,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,165R14_ULTIMA XPC_8PR_Q_TT
+1325222217098YLEVY,271.0,PCR,GT 2287 LEVI,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,225/50R17_LEVITAS ULTRA_98Y  TL
+1325221715100SRPG0,313.0,PCR,GT 2175 RAN HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,215/75R15_RANGER HT PUNCTURE GUARD_100S
+1D25118Z14008QXPC0,0.0,PCR,GT 1804 XPC TT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,185R14_ULTIMA XPC_8PR_Q_TT
+1325218514086HURL0,0.0,PCR,GT 1854 ROYL,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,185/65R14_UX ROYALE_86 H  TL
+1325221715100SRHT1,0.0,PCR,GT 2115 RAN HTW,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,215/75 R15 RANGER HT 100S RWL
+1325223715105TRHT0,0.0,PCR,GT 2375 RAN HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,235/75R15 105T RANGER H/T TL
+1325224117099VUX10,0.0,PCR,GT 2417 UX1,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,245/45R17_UX1_99V TL
+1325226616111TBHT0,0.0,PCR,GT 2656 BLA HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,265/70R16 BLAZZE H/T 111T  TL
+1325231015109RBXT0,0.0,PCR,GT 3005 BLA XAT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,31X10.50R15 LT BLAZZE X-A/T TL ? 109 R
+1325219315089VUX10,0.0,PCR,GT 1935 UX1 EXP,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,195/55R15 UX1 89 V TL
+1325218614088HURL0,0.0,PCR,GT 1884 ROYL,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,185/70 R14_UX ROYALE_88_H_TL
+1325223517104HRHT1,0.0,PCR,GT 2017 RAN HTW,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,235/65 R17 RANGER HT 104H RWL
+1325214813075STMX0,0.0,PCR,GT 1453 MAX,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,145/80 R13_TAXIMAX_75 S TL
+1325220516095HURL1,0.0,PCR,GT 2516 ROYL,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,205/65 R16_UXROYALE_95 H TL_DOM EXP
+1325220516095HTMX0,0.0,PCR,GT 2066 MAX,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,205/65R16_TAXIMAX_95 H TL
+1325221416095HURL2,0.0,PCR,GT 2166 ROYL KIA,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,215/60R16_UX ROYALE_95 H TL_FOR KIA AY 1
+1325225518111HRHP0,0.0,PCR,GT 2558 RAN HTP,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,255/65R18_RANGER HT_111H TL  _ M&M
+1325216513077TUHL0,0.0,PCR,GT 1623 UHL,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,165/65R13_ ULTIMA HI^LIFE _77 T TL
+1325224117099WLEVY,0.0,PCR,GT 2447 LEVI,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,245/45 R17_LEVITAS ULTRA_99W  TL
+1325221716101TRHT0,0.0,PCR,GT2176 RAN HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,215/75 R 16_RANGER H/T _101_T_TL
+1325218614088TVECE,0.0,PCR,GT 1834 VEC EXP,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,185/70R14_ VECTRA _88 T TL_BRAZIL EXPORT
+1325226617118QRMT0,0.0,PCR,GT 2677 RAN MT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,265/70R17 RANGER M/T_118/115_Q_8PR RWL
+1325218515088TVEUE,0.0,PCR,GT 1805 VEC,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,185/65 R15_VECTRA_88T T TL
+1325114812074TUNX0,0.0,PCR,GT 1462 NXT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,145/80R12 ULTIMA NXT _74_T_TT
+1325226517112HRHT0,0.0,PCR,GT2667 RAN HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,265/65 R17_RANGER H/T _112_H_TL
+1325226517112HRHT1,1.0,PCR,GT 2117 RAN HTW,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,265/65 R17 RANGER HT 112H RWL
+1325221715100SBHT0,0.0,PCR,GT 2045 BLA HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,215/75R15 BLAZZE H/T 100S TL
+1325223616105TRAT1,1.0,PCR,GT 2016 RAN ATW,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,235/70 R16 RANGER AT 105T RWL
+1325216614081SUTR0,0.0,PCR,GT 1694 UXT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,165/70R14_ UX TOURING _81 S TL
+1325221715100SRHT0,0.0,PCR,GT 2055 RAN HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,215/75 R 15_RANGER H/T _100_S_TL
+1325215613075TUNE1,79.0,PCR,GT1543 NEO,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,155/70 R 13_ULTIMA NEO_75_T_TL
+1325216514079TTMX0,0.0,PCR,GT 1644 MAX,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,165/65 R14_TAXIMAX_79 T TL
+1325218515088TVEUE,1640.0,PCR,GT 1805 VEC,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,185/65 R15_VECTRA_88T T TL
+1325220316091VURL0,0.0,PCR,GT 2556 ROYL,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,205/55 R 16 _UX ROYALE_91_V_TL
+1325220415095VUX10,56.0,PCR,GT 2025 UX1 EXP,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,205/60R15 UX1 95 V TL
+1325221317098VUX10,116.0,PCR,GT 2157 UX1,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,215/55R17 _UX1_98 V TL
+1325221Z15113RRAT0,795.0,PCR,GT 2125 RAN AT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,215R15C _RANGER AT_8 PR_113/111 R TL
+1325222217098VUX10,0.0,PCR,GT 2227 UX1 EXP,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,225/50R17 UX1 98 V TL
+1325222217098YLEVY,79.0,PCR,GT 2287 LEVI,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,225/50R17_LEVITAS ULTRA_98Y  TL
+1325222317101VUX10,0.0,PCR,GT 2257 UX1,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,225/55R17 _UX1_101 V TL
+1325223517104HBHT0,0.0,PCR,GT2337 BLA HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,235/65R17 BLAZZE H/T 104H TL
+1325226616111TBHT0,27.0,PCR,GT 2656 BLA HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,265/70R16 BLAZZE H/T 111T  TL
+1325226617115TRHT0,70.0,PCR,GT 2627 RAN HT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,265/70R17_RANGER HT_115 T TL
+1325231015109RBXT0,82.0,PCR,GT 3005 BLA XAT,crosswalk,no row in allowed_press_matrix -- no press can cure this GT,31X10.50R15 LT BLAZZE X-A/T TL – 109 R

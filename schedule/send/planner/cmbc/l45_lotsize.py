@@ -48,6 +48,7 @@ from pathlib import Path
 import polars as pl
 
 from planner.cmbc import plant_ct
+from planner.cmbc import r3_cap
 from planner.cmbc import _stamp
 from planner.config import CONFIG, GT_SHELF_LIFE_H
 
@@ -204,9 +205,12 @@ def main() -> None:
     # written twice with two values, which is the duplicated-constant defect
     # PARTITION section 1g records. `PLANNER_PRESS_AVAIL` overrides both plants
     # here exactly as it does in L5, so the two layers can never diverge again.
-    _av45 = os.environ.get("PLANNER_PRESS_AVAIL", "")
-    PCT = plant_ct.get({q: (float(_av45) if _av45 else 1.0)
-                        for q in ("PCR", "TBR")})
+    # RESOLVED IN ONE PLACE -- `plant_ct.PRESS_AVAIL`, the same dict L5 reads.
+    # This site and L5 each used to parse PLANNER_PRESS_AVAIL separately, which
+    # is the duplicated-constant defect PARTITION §1g records; per-plant
+    # availability (PLANNER_PRESS_AVAIL_PCR / _TBR) could not have reached both
+    # copies without a third. Ships 1.0 / 1.0 -- byte-identical.
+    PCT = plant_ct.get(dict(plant_ct.PRESS_AVAIL))
 
     print("=" * 92)
     print(f"L4.5  LOT SIZING & DEMAND CONSOLIDATION  --  {a.month}  (R9, B12)")
@@ -250,9 +254,18 @@ def main() -> None:
     r = r.with_columns(pl.col("mould_set").fill_null(
         pl.concat_str([pl.lit("SOLO::"), pl.col("plant"), pl.lit("::"),
                        pl.col("gt_code")])))
-    r = r.join(mo.select(["plant", "gt_code", "moulds"]),
+    r = r.join(mo.select(["plant", "gt_code", "moulds", "observed_max"]),
                on=["plant", "gt_code"], how="left").with_columns(
-        pl.col("moulds").fill_null(0))
+        pl.col("moulds").fill_null(0), pl.col("observed_max").fill_null(0))
+    # R3 EFFECTIVE CONCURRENCY -- one derivation, shared with L5 and L11.
+    # `moulds` counts mould HALVES; the plant ruling is 2 per press (LH + RH), so
+    # the presses a GT can occupy AT ONCE is `moulds / PLANNER_R3_DIV`. That
+    # matters HERE and not only in L5: the R5 ceiling below is
+    # `max_lot = concurrency x rate x 72 h`, so a concurrency that is 2x too high
+    # authorises a cure campaign 2x longer than the green tyres in it can live.
+    # Ships at DIV = 1.0, i.e. `moulds` unchanged. See planner/cmbc/r3_cap.py.
+    _r3 = r3_cap.table(r.select("plant", "gt_code", "moulds", "observed_max")
+                        .iter_rows(named=True))
 
     # ---- 2-5. size the lots ---------------------------------------------
     rows = []
@@ -274,7 +287,7 @@ def main() -> None:
                          "min_lot": 0.0, "max_lot": 0.0,
                          "policy": "residual: below min_demand", "capped": False})
             continue
-        moulds = int(x["moulds"]) or 1
+        moulds = _r3.get((p, gt), int(x["moulds"]) or 1)
         # The floor answers "is it worth mounting a mould AT ALL?", so it is
         # per-MOULD, not per mould-set. Scaling it by the full mould count gave
         # a GT with 43 moulds a floor of 9,288 tyres, which is a capacity
@@ -363,8 +376,145 @@ def main() -> None:
             n = int(math.ceil(need / mx))
             qty = need / n
             pol.append("split at 72 h ceiling")
+        # ---- REBUILD lot_list WHENEVER `n` MOVED. THIS WAS THE DEFECT. ------
+        #
+        # `lot_list` is built from the cure-hours decile shape ABOVE, and `n` is
+        # then recomputed TWICE below it -- "consolidated to floor" and, the one
+        # that matters, "split at 72 h ceiling". Neither rebuilt the list. The
+        # row then wrote `n_lots = n` (new) beside `lot_sizes = lot_list` (stale),
+        # and `l5_cure_master` PREFERS `lot_sizes` (l5:1156-1160). So the R5
+        # shelf-life split was computed, written to `n_lots`, and silently
+        # discarded by the only layer that reads it.
+        #
+        # MEASURED on the shipped runs before this fix:
+        #     Jul  16 of 87 GT rows had len(lot_sizes) != n_lots · 26 campaigns
+        #          lost · 17 campaigns / 22,251 tyres ABOVE their own max_lot
+        #     Aug  10 of 91 · 18 lost · 12 campaigns / 14,291 tyres above
+        #     worst: GT 5101 - 11.00R20 JS114, max_lot 137.7, lot_sizes [696.0]
+        #            -- 5.05x the R5 ceiling in ONE campaign
+        #
+        # A campaign longer than `mx = moulds x rate x GT_SHELF_LIFE_H` cannot be
+        # cured inside 72 h by construction, so this shipped plans whose green
+        # tyres expire mid-campaign -- and L11 could not see it, because it gates
+        # R5 on build->cure wait, not on campaign length against max_lot.
+        #
+        # Rebuild on the SAME decile shape so the distribution survives, then
+        # verify: if any piece still exceeds `mx`, fall back to n equal lots,
+        # which respects the ceiling by construction since qty = need/n <= mx.
+        if lot_list is not None and len(lot_list) != n:
+            _sh = shape_h.get(p) or []
+            _new = None
+            if n > 1 and len(_sh) >= 2:
+                _picks = [_sh[(i * len(_sh)) // n] for i in range(n)]
+                if sum(_picks) > 0:
+                    _new = integer_split(need, _picks, mn)
+            if not _new or len(_new) != n or max(_new) > mx:
+                _new = None                     # L5 then uses lot_qty x n_lots
+            lot_list = _new
+
+        # ---- THE R5 CEILING WAS TESTED ON THE AVERAGE, NOT THE LARGEST LOT ---
+        #
+        # `if qty > mx` above compares `need / n` -- the MEAN lot -- against the
+        # shelf-life ceiling. But the decile shape deliberately makes lots UNEVEN,
+        # so a GT can pass on its average and still carry a tail lot far above
+        # `mx`. Nothing downstream re-checks: L5 seats `lot_sizes` verbatim.
+        #
+        #   GT 1482 UHL, July: need 20,690, n_lots 12, mean 1,724 (mx 3,344 -- OK)
+        #                      but the shape emits a 4,101-tyre lot. 1.23x over.
+        #
+        # Measured over-ceiling campaigns, July / August:
+        #     git HEAD                 36 rows / 72,175 tyres · 33 / 74,392
+        #     + the rebuild above      19 / 49,924            · 21 / 60,101
+        #     + this max-check         see the print below
+        #
+        # A lot above `mx = moulds x rate x GT_SHELF_LIFE_H` cannot be cured
+        # inside 72 h by construction. Grow `n` until the LARGEST lot fits, then
+        # re-split on the same shape; fall back to equal lots if the shape still
+        # cannot satisfy it. Equal lots always fit, since need/n <= mx once
+        # n >= ceil(need/mx).
+        if lot_list and max(lot_list) > mx > 0:
+            _sh2 = shape_h.get(p) or []
+            _n2, _fixed = n, None
+            while _n2 < int(math.ceil(need / mx)) + len(_sh2) + 2:
+                _n2 += 1
+                _c = None
+                if len(_sh2) >= 2:
+                    _pk = [_sh2[(i * len(_sh2)) // _n2] for i in range(_n2)]
+                    if sum(_pk) > 0:
+                        _c = integer_split(need, _pk, mn)
+                if _c and len(_c) == _n2 and max(_c) <= mx and min(_c) >= mn:
+                    _fixed = _c
+                    break
+            if _fixed:
+                lot_list, n = _fixed, len(_fixed)
+            else:
+                n = max(n, int(math.ceil(need / mx)))
+                lot_list = None                 # equal lots respect mx by construction
+            qty = need / n
+            pol.append("R5 ceiling on largest lot")
+
+        # ---- G1: NEVER PRODUCE MORE THAN THE REQUIREMENT --------------------
+        #
+        # `qty = round(need / n)` was the last round-UP left in this file, and it
+        # is the one `integer_split` was written to remove. When `lot_list` is
+        # None -- which the two fixes above make MORE common, because both fall
+        # back to equal lots -- L5 expands `[lot_qty] * n_lots`, and
+        # `round(need/n) * n` can exceed `need` by up to n/2 tyres.
+        #
+        # It is small per GT and large in aggregate. Measured on the arms before
+        # this fix (LOT_jul / LOT_aug):
+        #     over-CURED  Jul PCR 1,153 (40 of 48 GTs) · TBR 1,759 (41 of 56)
+        #                 Aug PCR 1,141 (47 of 73)     · TBR 1,730 (31 of 37)
+        #     over-BUILT  Jul 545 + 399 · Aug 327 + 98
+        #     total 5,783 cured and 1,369 built beyond requirement.
+        # TBR ran 84 % of its GTs over demand. This is the G1 breach the
+        # `integer_split` docstring records at 707 tyres -- it never went away,
+        # it moved from the cavity-multiple round-up to this line.
+        #
+        # ===== SHIPS OFF. THE PREMISE WAS FALSE AND THE MEASUREMENT IS MIXED. ==
+        #
+        # THE PREMISE WAS A MEASUREMENT DEFECT OF MY OWN. The 5,783 above sums
+        # only the GTs where `cured > demand` and ignores every GT that came in
+        # UNDER. With rounding in both directions that sum is positive by
+        # construction and says nothing. The NET figures are the honest ones:
+        #
+        #             net cured - demand      net built - gross_build
+        #   Jul PCR            -214                   -20,717
+        #   Jul TBR            +262                    -2,948
+        #   Aug PCR          -6,566                   -22,367
+        #   Aug TBR          +1,077                    -2,247
+        #
+        # The plan UNDER-produces on every cell but TBR cure, and TBR's small
+        # surplus is the cure-yield allowance (0.98202 => ~1.8 % scrap cover), not
+        # a rounding leak. There is no G1 breach to fix. This is the fourth
+        # measurement defect of the "sum only the positive deviations" family --
+        # the same shape as mean-over-events (§1) and the fed-vs-BUILT trap.
+        #
+        # MEASURED ANYWAY, fresh arms, both months (vs the 4ab.1+4ab.2 arms):
+        #   Jul PCR BUILT -2,567 · L11 30 -> 33 · TBR R5 62.3 -> 69.1 h
+        #   Aug PCR BUILT +2,565 · starved 18,311 -> 15,744 · R5 62.7 -> 55.4 h
+        # Mixed sign on BUILT across months, so it fails the two-month gate. The
+        # July L11 +3 and the August starvation gain are real and unexplained --
+        # if the exact-split idea is ever revisited, start from those, not from
+        # an over-production claim that does not survive a net count.
+        #
+        # `PLANNER_L45_EXACT_SPLIT=1` restores it for that measurement.
+        if (os.environ.get("PLANNER_L45_EXACT_SPLIT", "0") != "0"
+                and lot_list is None and n > 0):
+            _base = int(need // n)
+            _rem = int(round(need)) - _base * n
+            lot_list = [_base + (1 if i < _rem else 0) for i in range(n)]
+            if max(lot_list) > mx > 0 or (mn > 0 and min(lot_list) < mn):
+                lot_list = None               # keep the old shape; floors win
         qty = float(int(round(qty)))          # whole tyres, never a fraction
-        capped = qty > mx
+        # DEFECT 4ai -- this graded `qty`, which `:362`/`:438` had ALREADY forced
+        # under `mx`, so `capped` was constant-False: 0 of 85/84/87/91 rows across
+        # four months. It also graded the MEAN lot while L5 consumes `lot_sizes`
+        # -- the same mean-vs-max error as §4ab.2, which fixed the producer and
+        # left the gate. 2026-05/06 still hold 43,578 / 63,554 tyres in lots above
+        # the R5 ceiling with this gate printing `0 PASS` on every one.
+        # A gate must grade the value its CONSUMER reads.
+        capped = bool(lot_list) and mx > 0 and max(lot_list) > mx
         # ---- PER-LOT DEADLINE, FROM THE ORDER BOOK ------------------------
         #
         # THE SIGNAL WE WERE THROWING AWAY. `demand_<M>.parquet` carries

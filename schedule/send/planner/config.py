@@ -253,6 +253,24 @@ class Thresholds(BaseSettings):
     # planner/cmbc/l5_cure_master.py for the arms, the numbers and the reason it
     # ships off.
     cure_day_cap: dict[str, int] = {"PCR": 0, "TBR": 0}
+    # MOULDS PER PRESS -- PLANT RULING, given 2026-08-19 and again 2026-08-21.
+    # "One press holds 2 moulds (LH + RH). One cycle produces 2 tyres." Both
+    # plants. `plant_ct.CAVITIES = 2.0` already honours the SECOND half of that
+    # ruling (2 tyres per cycle); this constant is the FIRST half, which no
+    # consumer honoured at all -- `cap_mould_<M>.parquet` sets
+    # `max_concurrent_presses == moulds` on 100 % of its 110 rows, so a GT with
+    # 26 moulds may be seated on 26 presses at once when the plant can only mount
+    # 13 pairs.
+    #
+    # CORROBORATION, not assumption: `cap_mould`'s own `observed_max` (distinct
+    # presses the plant actually ran a GT on in one day, over 8 months) has p50
+    # EXACTLY moulds/2 on both plants -- PCR moulds p50 4 / observed_max p50 2,
+    # TBR 6 / 3. The divisor the plant's own history implies is 2.
+    #
+    # THIS CONSTANT IS INERT UNTIL `PLANNER_R3_DIV` IS SET. It is the default
+    # divisor for planner/cmbc/r3_cap.py, which ships with the divisor at 1.0
+    # (= today's behaviour). See that module for the measurement.
+    moulds_per_press: int = 2
     # MINIMUM RUNNABLE LOT (rule B12 / R9). A supervisor will not set up a
     # machine for a handful of tyres. Without a floor the plan emitted PCR p50
     # 76 and TBR p50 23, with 61%/98% of lots below 150 units and 101 lots of a

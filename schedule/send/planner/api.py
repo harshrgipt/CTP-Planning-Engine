@@ -125,6 +125,148 @@ def _guard_env() -> None:
 
 
 # ------------------------------------------------------------- holidays ------
+# ---- THE BTP HOLIDAY TABLE -------------------------------------------------
+# The frontend and BTP both speak this schema, so the engine reads and writes it
+# rather than making the UI translate. One row = one entry, with a RANGE and an
+# optional shift list -- a flat date list cannot express either, which is why
+# `set_holidays` alone was not enough.
+BTP_COLUMNS = ["id", "plant_name", "product_name", "plan_month", "holiday_name",
+               "holiday_type", "start_date", "end_date", "is_full_day",
+               "impacted_shifts", "remarks", "created_at", "created_by",
+               "updated_at", "updated_by"]
+
+_SHIFTS = ("A", "B", "C")
+
+
+def _btp_row(rec: dict, month: str) -> dict:
+    """Validate ONE frontend record into a BTP row. Raises PlanError, never guesses."""
+    import uuid
+    g = lambda *k: next((rec[x] for x in k if rec.get(x) not in (None, "")), None)  # noqa: E731
+    sd = g("start_date", "date", "from")
+    if not sd:
+        raise PlanError("holiday needs a start_date")
+    ed = g("end_date", "to") or sd
+    try:
+        a = date.fromisoformat(str(sd)[:10])
+        b = date.fromisoformat(str(ed)[:10])
+    except ValueError:
+        raise PlanError(f"bad holiday date {sd!r}/{ed!r} -- use 'YYYY-MM-DD'") from None
+    if b < a:
+        raise PlanError(f"end_date {b} is before start_date {a}")
+
+    prod = str(g("product_name", "plant", "product") or "").upper()
+    if prod in ("ALL", "BOTH"):
+        prod = ""
+    if prod and prod not in ("PCR", "TBR"):
+        raise PlanError(f"unknown product_name {prod!r} -- use 'PCR', 'TBR' or blank for both")
+
+    full = g("is_full_day", "full_day")
+    is_full = True if full is None else str(full).strip().upper() not in ("0", "FALSE", "NO", "N")
+    sh = g("impacted_shifts", "shifts") or ""
+    if isinstance(sh, (list, tuple)):
+        sh = ",".join(str(x) for x in sh)
+    sh = "" if str(sh).upper() in ("NULL", "NONE", "NAN") else str(sh).strip()
+    if not is_full:
+        names = [x.strip().upper() for x in sh.replace("|", ",").split(",") if x.strip()]
+        bad = [x for x in names if x not in _SHIFTS]
+        if bad:
+            raise PlanError(f"unknown shift {bad[0]!r} -- use A, B or C")
+        if not names:
+            # FAIL LOUD. A partial closure with no shifts named is ambiguous, and
+            # the safe reading (close the whole day) is not what the user meant.
+            raise PlanError("is_full_day=0 needs impacted_shifts, e.g. 'A,B'")
+        if set(names) == set(_SHIFTS):
+            is_full, sh = True, ""
+        else:
+            sh = ",".join(names)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return {"id": str(g("id") or uuid.uuid4()),
+            "plant_name": str(g("plant_name", "site") or "BTP"),
+            "product_name": prod,
+            # `plan_month` is the month the entry was FILED under. It is written
+            # for BTP's benefit and never used to select rows -- a 1 September
+            # closure constrains an August campaign running into the 72 h tail,
+            # so `holiday.read_btp_csv` filters on the DATES. Defaulting it to
+            # the row's own start date keeps a cross-boundary entry self-describing.
+            "plan_month": str(g("plan_month") or f"{a:%Y-%m}"),
+            "holiday_name": str(g("holiday_name", "name") or "Holiday"),
+            "holiday_type": str(g("holiday_type", "type") or "HOLIDAY").upper(),
+            "start_date": f"{a:%Y-%m-%d}", "end_date": f"{b:%Y-%m-%d}",
+            "is_full_day": "1" if is_full else "0",
+            "impacted_shifts": sh or "NULL",
+            "remarks": str(g("remarks", "note") or ""),
+            "created_at": str(g("created_at") or now),
+            "created_by": str(g("created_by") or "frontend"),
+            "updated_at": now,
+            "updated_by": str(g("updated_by", "created_by") or "frontend")}
+
+
+def get_btp_holidays(month: str) -> dict[str, Any]:
+    """Every BTP row that CONSTRAINS this month, plus the windows they resolve to.
+
+    Returns the rows the engine will actually honour -- filtered by DATE, so a
+    row filed under a different `plan_month` still appears if its dates land in
+    the planning window. That is the behaviour the frontend must show, because it
+    is the behaviour the plan gets.
+    """
+    import csv
+    month = _check_month(month)
+    f = _btp_path(month)
+    rows: list[dict] = []
+    if f.exists():
+        with open(f, newline="", encoding="utf-8-sig") as fh:
+            rows = [dict(r) for r in csv.DictReader(fh)]
+    from planner.cmbc import holiday as _hol
+    win = _hol.read_btp_csv(f, month) if f.exists() else {"PCR": [], "TBR": []}
+    return {"month": month, "file": str(f), "rows": rows,
+            "armed": any(win[p] for p in ("PCR", "TBR")),
+            "windows": {p: [[s.isoformat(), e.isoformat()] for s, e in _hol._merge(win[p])]
+                        for p in ("PCR", "TBR")}}
+
+
+def set_btp_holidays(month: str, rows: Any) -> dict[str, Any]:
+    """Replace the month's BTP holiday table. Pass None/[] to clear it.
+
+    Accepts the frontend's own field names (`date`, `plant`, `shifts`, `name`)
+    as well as the BTP column names, so the UI does not have to translate.
+    Writes the FULL 15-column BTP schema every time.
+    """
+    import csv
+    month = _check_month(month)
+    f = _btp_path(month)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    if rows is None or (isinstance(rows, (list, tuple)) and not rows):
+        f.unlink(missing_ok=True)
+        return {"month": month, "armed": False, "rows": [], "file": str(f)}
+    if isinstance(rows, dict):
+        rows = [rows]
+    out = [_btp_row(dict(r), month) for r in rows]
+    with open(f, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=BTP_COLUMNS)
+        w.writeheader()
+        w.writerows(out)
+    return get_btp_holidays(month)
+
+
+def add_btp_holiday(month: str, **rec: Any) -> dict[str, Any]:
+    """Append ONE entry -- what the Add Holiday dialog calls."""
+    cur = get_btp_holidays(month)["rows"]
+    return set_btp_holidays(month, cur + [rec])
+
+
+def delete_btp_holiday(month: str, holiday_id: str) -> dict[str, Any]:
+    cur = get_btp_holidays(month)["rows"]
+    keep = [r for r in cur if str(r.get("id")) != str(holiday_id)]
+    if len(keep) == len(cur):
+        raise PlanError(f"no holiday with id {holiday_id!r} in {month}")
+    return set_btp_holidays(month, keep)
+
+
+def _btp_path(month: str):
+    return paths.MASTERS / f"holidays_{month}.csv"
+
+
 def get_holidays(month: str) -> dict[str, Any]:
     """What is currently armed for this month. Safe to call any time."""
     month = _check_month(month)

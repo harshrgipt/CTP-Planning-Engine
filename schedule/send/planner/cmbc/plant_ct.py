@@ -104,6 +104,109 @@ LOAD_UNLOAD_MIN = ({"PCR": float(_LU), "TBR": float(_LU)} if _LU
                    else {"PCR": float(os.environ.get("PLANNER_LOAD_UNLOAD_PCR", "2.5")),
                          "TBR": float(os.environ.get("PLANNER_LOAD_UNLOAD_TBR", "5.75"))})
 
+# -------------------------------------------------------------------------
+# PRESS AVAILABILITY -- ONE RESOLUTION, TWO READERS. Ships 1.0 / 1.0.
+# -------------------------------------------------------------------------
+# THE PER-SKU CURE TIME IS ALREADY HERE. `plant_ct_cure_gt.parquet` is built by
+# scripts/ingest_plant_cycle_times.py from the plant's OWN workbooks
+# (`INPUT/cycletime/PCR Curing cycle time 2.xlsx` sheet 'PCR CYCLE TIME';
+# `TBR CURING CYCLE TIME.xlsx` sheet 'Bladder list'), bridged to GT codes through
+# scripts/gt_namespace.py, and it reproduces the workbooks exactly:
+#   PCR  min 10.0  p25 12.5  p50 13.1  p75 15.0  max 22.0  min/cycle  (230 GTs)
+#   TBR  min 42.0  p25 49.0  p50 52.0  p75 54.0  max 60.0            (131 GTs)
+# `press_rate` below is therefore ALREADY 2 tyres / (per-GT cure + load/unload),
+# per GT, with the plant's own dispersion. `cycle_time_curing.parquet` -- the
+# press-keyed 172-row table with `slots = 4` and `eff_ct_min` p50 35.8 -- is read
+# ONLY by diagnostics, exporters and the RETIRED `_retired/l1_validate.py`. It
+# reaches no live cure rate. Do not "fix" it expecting the plan to move.
+#
+# WHAT IS ACTUALLY MISSING IS THE HAIRCUT. Measured on August 2026, volume-
+# weighted over `net_requirement.cure_requirement` (harmonic, because the
+# quantity conserved is press-HOURS):
+#
+#            nameplate t/press-h   plan realised   plant realised p50
+#   PCR            7.218               6.989            6.50   (156/press-day)
+#   TBR            2.103               2.033            1.83   ( 44/press-day)
+#
+# so the plan runs 7.5 % (PCR) / 11.1 % (TBR) above what the plant demonstrably
+# achieves, and the difference is availability -- breakdowns, no-load, changeover
+# the model does not carry. The docstring above says availability MUST be applied
+# here and MUST NOT have been applied before it; it then shipped OFF on
+# 2026-08-19 by plant instruction, leaving a nameplate plan.
+#
+# THE FIGURE IS A SWEEP HANDLE, NOT A MINED CONSTANT. Wiring one quantile in as
+# a hard number is this project's signature defect (PARTITION §1 -- tau* and
+# min_lot cost 13.4 pt between them), so nothing is defaulted: 1.0 ships, and the
+# arms below name the factor they used and where it came from.
+#
+# `PLANNER_PRESS_AVAIL` still overrides BOTH plants with one figure, so it can no
+# longer express a per-plant setting -- use `PLANNER_PRESS_AVAIL_PCR` /
+# `PLANNER_PRESS_AVAIL_TBR`. This dict is the ONLY place the value is resolved;
+# `l5_cure_master` and `l45_lotsize` both read it, because the two layers sizing
+# and seating against different press rates is the duplicated-constant defect
+# PARTITION §1g records (and §8: "add a cap in config.py or nowhere" -- this is
+# not a cap, it is a rate input, and its single home is this module).
+# =========================================================================
+# SHIPS 1.0 / 1.0 (OFF). MEASURED 2026-08-21, AUGUST 2026, BOTH PLANTS.
+# =========================================================================
+# Arms fresh via scripts/run_arm.py, gated FRESH by check_arm_fresh.py.
+# Baseline `MC_base` = the shipped SHIP2_aug configuration, reproduced to the
+# tyre. Partition stamped 2026-08 sha1 809beda91344; the plant-day closure pinned
+# with PLANNER_HOLIDAYS=2026-08-15 on every arm.
+#
+#   PCR   demand 429,146                      cure   max    days over
+#   arm      avail      BUILT    dBUILT   ful%  rate   day    13,854   L11
+#   MC_base  1.0000   409,511        +0  92.59  6.989 14,465    16    32/48
+#   MC_b96   0.9600   402,815    -6,696  91.07  6.707 14,423    17    33/48
+#   MC_b93   0.9300   406,023    -3,488  90.83  6.505 14,202    10    33/48
+#   MC_bmt   0.8897   403,891    -5,620  88.19  6.240 13,558     0    32/48
+#
+#   TBR   demand 99,019                       cure   max    days over
+#   MC_base  1.0000    98,003        +0  97.89  2.033  3,477     0    32/48
+#   MC_b96   0.9600    96,935    -1,068  96.99  1.952  3,440     0    33/48
+#   MC_b93   0.9000    96,053    -1,950  95.62  1.832  3,430     0    33/48
+#   MC_bmt   0.8282    95,987    -2,016  94.02  1.688  3,270     0    32/48
+#
+# WHERE THE FACTORS COME FROM, so the substitution is never invisible:
+#   0.930 / 0.900  chosen so the PLAN's realised rate lands on the plant's own
+#                  realised per-press-day p50 (PCR 156/day = 6.50 t/press-h,
+#                  TBR 44/day = 1.83). It does: 6.505 and 1.832.
+#   0.8897 / 0.8282  the mined MTBF/MTTR haircut from warehouse/params (PCR
+#                  mtbf 106.8 h / mttr 13.2 h over 4,267 down events) that this
+#                  engine shipped until the plant switched it off on 2026-08-19.
+#   0.96           a light arm, to show the curve is not a step.
+# NONE of them is defaulted. A quantile wired in as a constant is PARTITION §1
+# (tau*, min_lot, 13.4 pt); the arm names the number and the plant chooses.
+#
+# THE TEST THAT MATTERED, AND ITS ANSWER
+#   "Does the plan's best day fall inside the plant's demonstrated range?"
+#   TBR: ALREADY YES on every arm -- max 3,477 against a 3,599 record, 0 days
+#        over. The TBR rate being 11 % high never showed up as an impossible day
+#        because TBR is not press-bound. Do not sell a TBR haircut as fixing a
+#        daily-rate problem TBR does not have.
+#   PCR: NO, on every arm except MC_bmt. Base runs a FLAT 14,465/day plateau on
+#        10 days -- that is 86 presses x 24 h x 6.989 -- and exceeds the plant's
+#        8-month record on 16 of the 30 open days. Calibrating the RATE exactly
+#        onto the plant's p50 (MC_b93) still leaves 10 days over, because the
+#        plant does not also keep every press seated 24 h. Only 0.8897 clears it.
+#
+# ⚠ AND THE ARM THAT CLEARS IT BREACHES G8. MC_bmt's PCR GT-inventory daily-mean
+#   max is **5,129 against the 4,800 rail** (base 4,561); the time-weighted mean
+#   rises 3,998 -> 4,167 and the carry-out tail 12,620 -> 26,816. Slower presses
+#   drain the buffer more slowly, so the cure-rate haircut is paid for in green
+#   tyres standing. The only arm that makes the daily curve physically credible
+#   makes the inventory rail illegal. That trade is in one sentence on purpose.
+#
+# ⚠ IT ALSO MAKES THE R3 PROBLEM WORSE, NOT BETTER. GTs whose peak concurrency
+#   exceeds the plant's observed_max: PCR 2 -> 5 (12,435 -> 97,618 tyres),
+#   TBR 9 -> 10 at MC_b93. A slower press needs more presses at once for the same
+#   demand. The two fixes pull in opposite directions on that metric even though
+#   their volume effects are additive (see the interaction table in r3_cap.py).
+_PA = os.environ.get("PLANNER_PRESS_AVAIL", "")
+PRESS_AVAIL = ({"PCR": float(_PA), "TBR": float(_PA)} if _PA
+               else {"PCR": float(os.environ.get("PLANNER_PRESS_AVAIL_PCR", "1.0")),
+                     "TBR": float(os.environ.get("PLANNER_PRESS_AVAIL_TBR", "1.0"))})
+
 # PCR machine make -- READ FROM THE ENGINE'S OWN CAPABILITY LAYER, not restated.
 # `cap_changeover.parquet` (written by l2_capability.py) already carries
 # `machine_type`: BJ for TBMPCR1..5, CONTI for TBMPCR6..11, SAV/MESNAC for TBR.
@@ -159,7 +262,12 @@ class PlantCT:
 
     def __init__(self, avail: dict[str, float] | None = None) -> None:
         self.ok = False
-        self.avail = avail or {"PCR": 1.0, "TBR": 1.0}
+        # Default to the module-level resolution, NOT to a literal 1.0. `get()`
+        # is a process-wide cache and its first caller wins, so a layer that
+        # calls `plant_ct.get()` with no argument (l4b, and l7 for build cadence)
+        # must not silently get a different press rate from the layer that
+        # called it with one.
+        self.avail = avail or dict(PRESS_AVAIL)
         self._b: dict[tuple[str, str, str], float] = {}
         self._b_gt: dict[tuple[str, str], float] = {}   # make-agnostic mean
         self._c: dict[tuple[str, str], float] = {}

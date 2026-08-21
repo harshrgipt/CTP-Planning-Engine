@@ -1,0 +1,48 @@
+{
+  "built_utc": "2026-08-21T10:10:45+00:00",
+  "rows": 430,
+  "by_src": {
+    "demand": 200,
+    "gt_sku_master.pcr": 137,
+    "gt_sku_master.tbr.bridged": 93
+  },
+  "by_plant": {
+    "PCR": 244,
+    "TBR": 186
+  },
+  "tbr_bridge_size": 79,
+  "tbr_bridge_ambiguous_dropped": [],
+  "unbridged_short_codes": [
+    "GT 5004",
+    "GT 5005",
+    "GT 5012",
+    "GT 5051",
+    "GT 5057",
+    "GT 5068",
+    "GT 5086",
+    "GT 5090",
+    "GT 5097",
+    "GT 5106",
+    "GT 5107",
+    "GT 5109",
+    "GT 5502",
+    "GT 5503"
+  ],
+  "conflicts": [],
+  "no_rim": 177,
+  "inputs": {
+    "gt_sku_master.parquet": "760c8bd62b75",
+    "gt_size.parquet": "f1ad3ad32766",
+    "demand_files": [
+      "demand_2025-12.parquet",
+      "demand_2026-01.parquet",
+      "demand_2026-02.parquet",
+      "demand_2026-03.parquet",
+      "demand_2026-04.parquet",
+      "demand_2026-05.parquet",
+      "demand_2026-06.parquet",
+      "demand_2026-07.parquet",
+      "demand_2026-08.parquet"
+    ]
+  }
+}

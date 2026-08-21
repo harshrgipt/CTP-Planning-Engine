@@ -1,7 +1,7 @@
 {
   "flags": {
     "PLANNER_L45_CAMP_STAT": "",
-    "PLANNER_LOOKAHEAD_PRORATA": "",
+    "PLANNER_LOOKAHEAD_PRORATA": "1",
     "PLANNER_OPENING_GT": "",
     "PLANNER_TH_MIN_LOT_UNITS": "",
     "PLANNER_TH_MIN_DEMAND_UNITS": "",
@@ -13,5 +13,5 @@
     "PLANNER_B16_FREEZE": "",
     "PLANNER_B16_LOAD_CAP": ""
   },
-  "sha1": "1c9f9ab6523b"
+  "sha1": "f601efffb119"
 }
